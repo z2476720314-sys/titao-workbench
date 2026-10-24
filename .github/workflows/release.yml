@@ -63,25 +63,28 @@ jobs:
         # -s 跳过 wails 自己的前端构建（上面已经构建过），避免重复装依赖。
         run: wails build -platform windows/amd64 -s -trimpath
 
-      - name: 计算校验值
+      - name: 重命名为 ASCII 文件名并计算校验值
         shell: pwsh
         run: |
           $exe = Get-ChildItem build/bin/*.exe | Select-Object -First 1
           if (-not $exe) { throw "构建产物不存在：build/bin/*.exe" }
-          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
-          # 只写裸 64 位 hex：updater.VerifySHA256 取第一个空白分隔字段，
-          # 裸 hash 既符合 sha256sum 的单字段形态，也不会因中文文件名触发 ASCII 编码失败
-          $hash | Out-File -FilePath "$($exe.FullName).sha256" -Encoding ascii -NoNewline
+          # GitHub Release 会把中文资产名改写成 default.exe / exe.sha256，
+          # 下载页看到的名字就没意义了。这里统一改成 ASCII 名再上传。
+          $ascii = Join-Path $exe.DirectoryName 'titao-workbench.exe'
+          if ($exe.FullName -ne $ascii) { Copy-Item $exe.FullName $ascii -Force }
+          $hash = (Get-FileHash $ascii -Algorithm SHA256).Hash.ToLower()
+          # 只写裸 64 位 hex：updater.VerifySHA256 取第一个空白分隔字段
+          $hash | Out-File -FilePath "$ascii.sha256" -Encoding ascii -NoNewline
           Write-Output "SHA256=$hash"
-          Write-Output "ASSET=$($exe.FullName)"
+          Write-Output "ASSET=$ascii"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: titao-workbench-windows-amd64
           path: |
-            build/bin/*.exe
-            build/bin/*.exe.sha256
+            build/bin/titao-workbench.exe
+            build/bin/titao-workbench.exe.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -91,8 +94,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/bin/*.exe
-            build/bin/*.exe.sha256
+            build/bin/titao-workbench.exe
+            build/bin/titao-workbench.exe.sha256
           generate_release_notes: false
           draft: false
           # tag 带 '-' 视为预发布（如 v0.3.0-beta），updater 会主动跳过预发布
@@ -100,12 +103,12 @@ jobs:
           body: |
             版本 ${{ github.ref_name }} 的 Windows x64 单文件版。
 
-            下载 `套图工作台.exe` 直接双击运行，无需安装、不依赖 Python 或环境变量。
+            下载 `titao-workbench.exe`（即「套图工作台」）直接双击运行，无需安装、不依赖 Python 或环境变量。
             首次运行会在 exe 同目录生成 `config.json`，需填入视觉模型接口的 API Key。
 
             校验方式（PowerShell）：
             ```powershell
-            Get-FileHash .\套图工作台.exe -Algorithm SHA256
+            Get-FileHash .\titao-workbench.exe -Algorithm SHA256
             ```
             与同目录的 `.sha256` 文件内容比对。
 
