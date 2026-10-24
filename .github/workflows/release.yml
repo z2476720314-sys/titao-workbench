@@ -69,8 +69,9 @@ jobs:
           $exe = Get-ChildItem build/bin/*.exe | Select-Object -First 1
           if (-not $exe) { throw "构建产物不存在：build/bin/*.exe" }
           $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
-          # 校验文件写成 sha256sum 兼容格式：<hash>  <文件名>，供 updater.VerifySHA256 读取
-          "$hash  $($exe.Name)" | Out-File -FilePath "$($exe.FullName).sha256" -Encoding ascii -NoNewline
+          # 只写裸 64 位 hex：updater.VerifySHA256 取第一个空白分隔字段，
+          # 裸 hash 既符合 sha256sum 的单字段形态，也不会因中文文件名触发 ASCII 编码失败
+          $hash | Out-File -FilePath "$($exe.FullName).sha256" -Encoding ascii -NoNewline
           Write-Output "SHA256=$hash"
           Write-Output "ASSET=$($exe.FullName)"
 
