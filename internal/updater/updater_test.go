@@ -68,9 +68,9 @@ func TestIsNewer(t *testing.T) {
 // TestNormalizeTag 守住显示用的去 v 前缀。
 func TestNormalizeTag(t *testing.T) {
 	for in, want := range map[string]string{
-		"v0.2.0": "0.2.0",
-		"V0.2.0": "0.2.0",
-		"0.2.0":  "0.2.0",
+		"v0.2.0":  "0.2.0",
+		"V0.2.0":  "0.2.0",
+		"0.2.0":   "0.2.0",
 		"  v1.0 ": "1.0",
 	} {
 		if got := NormalizeTag(in); got != want {

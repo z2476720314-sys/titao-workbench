@@ -7,6 +7,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"titao/internal/judge"
 	"titao/internal/precheck"
 	"titao/internal/psx"
+	"titao/internal/tuner"
 )
 
 // Phase 是单个任务的处理阶段。
@@ -32,6 +34,7 @@ const (
 	PhasePattern  Phase = "pattern"  // 规范化图案
 	PhaseRender   Phase = "render"   // Photoshop 渲染候选
 	PhaseJudge    Phase = "judge"    // 视觉模型选档
+	PhaseTune     Phase = "tune"     // 多轮评审微调
 	PhaseExport   Phase = "export"   // 切格导出
 	PhaseDone     Phase = "done"
 	PhaseFailed   Phase = "failed"
@@ -71,6 +74,7 @@ type Task struct {
 	Error        string   `json:"error"`
 	ChosenScale  float64  `json:"chosenScale"`
 	JudgeNote    string   `json:"judgeNote"`
+	TuneRounds   int      `json:"tuneRounds"` // 实际迭代轮数
 	ElapsedMS    int64    `json:"elapsedMs"`
 }
 
@@ -85,7 +89,21 @@ type Event struct {
 	Failed  int    `json:"failed,omitempty"`
 	Skipped int    `json:"skipped,omitempty"`
 	Running bool   `json:"running,omitempty"`
+	State   string `json:"state,omitempty"` // idle / running / paused / stopping
 }
+
+// State 是引擎的四态：空闲、运行中、已暂停、正在停止。
+//
+// 前端靠它决定「开始/暂停/继续/停止」四个按钮哪个可点，
+// 所以状态迁移必须唯一：同一个时刻只能有一个状态，由 mu 保护。
+type State string
+
+const (
+	StateIdle     State = "idle"     // 没有任务
+	StateRunning  State = "running"  // 正在逐组执行
+	StatePaused   State = "paused"   // 已请求暂停，停在组边界
+	StateStopping State = "stopping" // 已请求停止，当前组做完就收尾
+)
 
 // Engine 管理一次运行的完整生命周期。
 type Engine struct {
@@ -96,10 +114,19 @@ type Engine struct {
 	mu      sync.Mutex
 	tasks   []*Task
 	running bool
+	state   State
 	cancel  context.CancelFunc
 	started time.Time
 	done    int
 	failed  int
+
+	// 闸门：让 run 循环在组边界停住。
+	// 单独一把锁 + cond，不能用 mu：暂停等待期间 mu 必须能自由加解锁，
+	// 否则 Pause/Resume/Status 全部卡死在 Wait 上。
+	gmu    sync.Mutex
+	gcond  *sync.Cond
+	paused bool
+	stop   bool
 
 	// 预检记录库：懒加载，第一次用到时才读盘
 	pre      *precheck.Store
@@ -107,14 +134,33 @@ type Engine struct {
 	preErr   error
 	skipped  int
 	skipTags map[string]int // tag -> 次数，用于「水印 3 / 手机壳 5」这类汇总
+
+	// processFn 指向单组执行体。生产代码永远是 processOne；
+	// 测试替换成不依赖 Photoshop 的桩，好把「暂停/继续/停止」这些
+	// 调度行为单独测干净。
+	processFn func(*Engine, context.Context, Options, cfg.Config, judge.Config,
+		*Task, string, int, int)
 }
+
+// errStopped 是闸门放行后用来区分「用户停的」和「出错的」的哨兵错误。
+var errStopped = fmt.Errorf("已停止")
 
 // New 创建引擎。
 func New(ps *psx.Session, store *cfg.Store, emit func(Event)) *Engine {
-	return &Engine{ps: ps, store: store, emitFn: emit}
+	e := &Engine{ps: ps, store: store, emitFn: emit, state: StateIdle}
+	e.gcond = sync.NewCond(&e.gmu)
+	e.processFn = (*Engine).processOne
+	return e
 }
 
 func (e *Engine) emit(ev Event) {
+	// 状态由引擎统一盖章：调用点只管业务字段，避免每处都手写 Running/State
+	// 而不一致（前端就是靠这两个字段决定按钮可点性）。
+	st := e.State()
+	ev.State = string(st)
+	if st != StateIdle {
+		ev.Running = true
+	}
 	if e.emitFn != nil {
 		e.emitFn(ev)
 	}
@@ -150,14 +196,121 @@ func (e *Engine) Tasks() []*Task {
 	return out
 }
 
-// Cancel 请求停止当前运行。
-func (e *Engine) Cancel() {
+// State 返回当前状态。
+func (e *Engine) State() State {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.state == "" {
+		return StateIdle
+	}
+	return e.state
+}
+
+// Cancel 请求停止当前运行（保留给旧调用方，等价于 Stop）。
+func (e *Engine) Cancel() { e.Stop() }
+
+// Pause 请求暂停。
+//
+// 语义是「当前这组做完就停」——渲染一组要几秒到几十秒，中途硬切会留下
+// 半套图产物和一堆没关的 PS 文档。所以这里只翻标志位，真正的等待发生在
+// run 循环下一轮的 gate()。
+func (e *Engine) Pause() error {
+	e.mu.Lock()
+	st := e.state
+	if st != StateRunning {
+		e.mu.Unlock()
+		return fmt.Errorf("当前状态 %s，无法暂停", st)
+	}
+	e.mu.Unlock()
+
+	// 先合闸门再改状态：反过来的话，run 循环可能在这两步之间跑完当前组、
+	// 撞上还没关的闸门，多启动一组才发现已暂停。
+	e.gmu.Lock()
+	e.paused = true
+	e.gmu.Unlock()
+
+	e.mu.Lock()
+	if e.state != StateRunning {
+		// 合闸门期间被 Stop 抢先了，撤掉暂停标志，状态以 Stop 为准
+		cur := e.state
+		e.mu.Unlock()
+		e.gmu.Lock()
+		e.paused = false
+		e.gmu.Unlock()
+		return fmt.Errorf("当前状态 %s，无法暂停", cur)
+	}
+	e.state = StatePaused
+	e.mu.Unlock()
+
+	e.logf("warn", "⏸ 已暂停：当前这组做完就停在组边界，随时可以继续")
+	return nil
+}
+
+// Stop 请求停止：当前这组做完就收尾，未执行的组标 canceled。
+//
+// 故意不复用 ctx 取消来「立刻掐断」渲染：PS COM 调用被打断后残留的文档
+// 会让下一次运行输出错图。ctx 只用来让后续的组别再启动。
+func (e *Engine) Stop() {
+	e.mu.Lock()
+	if e.state == StateIdle {
+		e.mu.Unlock()
+		return
+	}
+	e.state = StateStopping
 	cancel := e.cancel
 	e.mu.Unlock()
+
+	// 先解闸门再取消：暂停中的 run 正卡在 gcond.Wait 上，
+	// 只取消 ctx 是叫不醒它的。
+	e.gmu.Lock()
+	e.stop = true
+	e.paused = false
+	e.gcond.Broadcast()
+	e.gmu.Unlock()
+
 	if cancel != nil {
 		cancel()
 	}
+	e.logf("warn", "⏹ 正在停止：当前这组做完就收尾")
+}
+
+// gate 是组边界的闸门：暂停时阻塞，停止或 ctx 结束时返回错误。
+//
+// 每个任务开始前调一次，所以暂停/停止的粒度是「一整组」，
+// 不会切在半成品状态上。
+func (e *Engine) gate(ctx context.Context) error {
+	e.gmu.Lock()
+	for e.paused && !e.stop {
+		e.gcond.Wait()
+	}
+	stopped := e.stop
+	e.gmu.Unlock()
+
+	if stopped {
+		return errStopped
+	}
+	return ctx.Err()
+}
+
+// isStopped 判断错误是否来自用户停止（而不是真正的故障）。
+func isStopped(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errStopped) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "已停止") || strings.Contains(msg, "context canceled")
+}
+
+// resetGate 在每次新运行开始时把闸门归零。
+func (e *Engine) resetGate() {
+	e.gmu.Lock()
+	e.paused = false
+	e.stop = false
+	e.gcond.Broadcast()
+	e.gmu.Unlock()
 }
 
 // Plan 把选项展开成任务列表，并做可执行性校验。
@@ -251,16 +404,13 @@ func expandPaths(items []string, exts map[string]bool) ([]string, error) {
 	return out, nil
 }
 
-// Start 启动一次运行。已在进行中时返回错误。
+// Start 启动一次全新的运行。已在进行中时返回错误。
+//
+// 会覆盖上一份 queue.json：用户点「开始」就是要按当前选择重新排队，
+// 不该被上次没跑完的残局干扰。
 func (e *Engine) Start(opt Options) error {
-	e.mu.Lock()
-	if e.running {
-		e.mu.Unlock()
-		return fmt.Errorf("已有任务在运行")
-	}
-	e.mu.Unlock()
-
-	// 配置加载失败时 store 为 nil，这里必须挡住：否则 e.store.Get() 空指针崩溃。
+	// 先做完全部校验再占状态位：占位后才发现参数不对，会把引擎永久卡在
+	// 「运行中」——用户既点不了开始也点不了停止。
 	if e.store == nil {
 		return fmt.Errorf("配置未加载，无法开始")
 	}
@@ -269,52 +419,216 @@ func (e *Engine) Start(opt Options) error {
 	if err != nil {
 		return err
 	}
+	return e.begin(opt, def, tasks, 0, 0)
+}
+
+// Resume 继续上一次运行。
+//
+// 两种情形共用同一个入口，前端只需要一个「继续」按钮：
+//   - 状态是 paused：解闸门，接着跑；
+//   - 状态是 idle 但 queue.json 里还有没结论的组（程序被关掉/强杀过）：
+//     从队列恢复任务列表和参数，只补跑没做完的组。
+func (e *Engine) Resume() error {
+	e.mu.Lock()
+	st := e.state
+	e.mu.Unlock()
+
+	switch st {
+	case StatePaused:
+		e.mu.Lock()
+		if e.state != StatePaused {
+			cur := e.state
+			e.mu.Unlock()
+			return fmt.Errorf("当前状态 %s，无法继续", cur)
+		}
+		e.state = StateRunning
+		e.mu.Unlock()
+
+		e.gmu.Lock()
+		e.paused = false
+		e.gcond.Broadcast()
+		e.gmu.Unlock()
+
+		e.logf("info", "▶ 已继续")
+		return nil
+
+	case StateIdle:
+		return e.resumeFromQueue()
+
+	case StateRunning:
+		return fmt.Errorf("当前状态 running，无需继续")
+
+	default:
+		return fmt.Errorf("当前状态 %s，无法继续", st)
+	}
+}
+
+// resumeFromQueue 从 queue.json 恢复一次运行。
+func (e *Engine) resumeFromQueue() error {
+	path := e.queuePath()
+	q, err := LoadQueue(path)
+	if err != nil {
+		// 队列坏了不该挡住用户：清掉残局，让「开始」可用
+		e.logf("warn", "队列文件损坏，已忽略：%v", err)
+		_ = RemoveQueue(path)
+		return fmt.Errorf("队列文件损坏，请点「开始套图」重新排队")
+	}
+	if q == nil || !q.HasPending() {
+		return fmt.Errorf("没有未完成的任务")
+	}
+	if e.store == nil {
+		return fmt.Errorf("配置未加载，无法继续")
+	}
+
+	def := e.store.Get()
+	tasks := q.ToTasks()
+
+	// 恢复计数：已完成的组要算进 done，否则「完成 0/N」会让人以为全白跑了
+	done, failed := 0, 0
+	for _, t := range tasks {
+		switch t.Phase {
+		case PhaseDone:
+			done++
+		case PhaseFailed:
+			failed++
+		}
+	}
+	e.logf("info", "↻ 从队列恢复：共 %d 组，其中 %d 组已完成，待跑 %d 组",
+		len(tasks), done+failed, q.CountPending())
+	return e.begin(q.Options, def, tasks, done, failed)
+}
+
+// tryLockIdle 抢占「空闲 → 运行中」这一次状态迁移，返回是否抢到。
+func (e *Engine) tryLockIdle() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.running || (e.state != StateIdle && e.state != "") {
+		return false
+	}
+	e.running = true
+	e.state = StateRunning
+	return true
+}
+
+// begin 装好运行状态并起 goroutine。
+//
+// 状态位在这里抢占，而不是在 Start/Resume 各自抢：两个入口共用一个
+// 「检查并占用」的点，才能保证同一时刻只有一次运行。
+func (e *Engine) begin(opt Options, def cfg.Config, tasks []*Task, done, failed int) error {
+	if len(tasks) == 0 {
+		return fmt.Errorf("没有可执行的任务")
+	}
+	if !e.tryLockIdle() {
+		return fmt.Errorf("已有任务在运行")
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	e.resetGate()
+
 	e.mu.Lock()
-	// Plan 期间可能有另一个 Start 抢先，这里再判一次
-	if e.running {
-		e.mu.Unlock()
-		cancel()
-		return fmt.Errorf("已有任务在运行")
-	}
 	e.tasks = tasks
-	e.running = true
 	e.cancel = cancel
 	e.started = time.Now()
-	e.done, e.failed = 0, 0
+	e.done, e.failed = done, failed
 	e.skipped, e.skipTags = 0, map[string]int{}
 	e.mu.Unlock()
+
+	// 立刻落一份队列：程序在这之后被强杀也能恢复
+	e.saveQueue(opt)
 
 	go e.run(ctx, opt, def, tasks)
 	return nil
 }
 
+// queuePath 是 queue.json 的位置：跟 config.json 同目录。
+func (e *Engine) queuePath() string {
+	if e.store == nil {
+		return ""
+	}
+	p := e.store.Path()
+	if p == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(p), "queue.json")
+}
+
+// PendingQueue 返回磁盘上还没跑完的队列；没有则返回 nil。
+//
+// 给前端在启动时问一次：「上次还有 N 组没做完，要继续吗？」
+// 队列文件损坏时返回 nil 并顺手清掉，不让残局永久卡住界面。
+func (e *Engine) PendingQueue() (*Queue, error) {
+	path := e.queuePath()
+	if path == "" {
+		return nil, nil
+	}
+	q, err := LoadQueue(path)
+	if err != nil {
+		e.logf("warn", "队列文件损坏，已清理：%v", err)
+		_ = RemoveQueue(path)
+		return nil, nil
+	}
+	if q == nil || !q.HasPending() {
+		return nil, nil
+	}
+	return q, nil
+}
+
+// ClearQueue 丢弃上次没跑完的队列。运行中不允许清，否则正在跑的任务
+// 一落盘又把文件写回来了，用户会以为按钮没生效。
+func (e *Engine) ClearQueue() error {
+	if e.IsRunning() {
+		return fmt.Errorf("运行中无法清理队列")
+	}
+	return RemoveQueue(e.queuePath())
+}
+
+// saveQueue 把当前进度落盘。写失败只记日志：恢复能力是加分项，
+// 不能因为磁盘只读之类的原因让整批任务停下。
+func (e *Engine) saveQueue(opt Options) {
+	path := e.queuePath()
+	if path == "" {
+		return
+	}
+	if err := SaveQueue(path, NewQueue(opt, e.Tasks())); err != nil {
+		e.logf("warn", "队列落盘失败（不影响本次运行）: %v", err)
+	}
+}
+
 func (e *Engine) run(ctx context.Context, opt Options, def cfg.Config, tasks []*Task) {
+	stopped := false
+
 	defer func() {
 		e.mu.Lock()
 		e.running = false
+		e.state = StateIdle
 		e.cancel = nil
 		done, failed := e.done, e.failed
 		skipped, skipTags := e.skipped, e.skipTags
 		e.mu.Unlock()
 
-		// 取消后 done+failed 会小于总数，此时不能报「完成」，否则用户以为跑全了
-		canceled := ctx.Err() != nil
+		// 停止后 done+failed 会小于总数，此时不能报「完成」，否则用户以为跑全了
+		pending := 0
+		for _, t := range e.Tasks() {
+			if !settledPhase(t.Phase) {
+				pending++
+			}
+		}
 		msg := fmt.Sprintf("完成：%d 组成功，%d 组失败", done, failed)
 		if skipped > 0 {
 			msg = fmt.Sprintf("完成：%d 组成功，%d 组失败，跳过 %d 组（%s）",
 				done, failed, skipped, tagSummary(skipTags))
 		}
-		if canceled {
-			msg = fmt.Sprintf("已取消：%d 组成功，%d 组失败，%d 组未执行",
-				done, failed, len(tasks)-done-failed)
+		if stopped || pending > 0 {
+			msg = fmt.Sprintf("已停止：%d 组成功，%d 组失败，%d 组未执行（可点继续）",
+				done, failed, pending)
 			if skipped > 0 {
-				msg = fmt.Sprintf("已取消：%d 组成功，%d 组失败，%d 组未执行，跳过 %d 组（%s）",
-					done, failed, len(tasks)-done-failed-skipped, skipped, tagSummary(skipTags))
+				msg = fmt.Sprintf("已停止：%d 组成功，%d 组失败，%d 组未执行，跳过 %d 组（%s）",
+					done, failed, pending, skipped, tagSummary(skipTags))
 			}
 		}
+		// 收尾再落一次：把 done/finished 刷新到磁盘
+		e.saveQueue(opt)
 		e.emit(Event{Type: "done", Total: len(tasks), Done: done, Failed: failed,
 			Skipped: skipped, Running: false, Message: msg})
 	}()
@@ -363,23 +677,61 @@ func (e *Engine) run(ctx context.Context, opt Options, def cfg.Config, tasks []*
 		len(tasks), outRoot, autoLabel(opt.Auto, def.Model))
 
 	// 清掉上次残留的 PS 文档，避免互相干扰
-	if err := e.ps.CloseAllDocs(); err != nil {
+	if err := e.closeDocs(); err != nil {
 		e.logf("warn", "清理 Photoshop 文档: %v", err)
 	}
 
 	for i, t := range tasks {
-		if ctx.Err() != nil {
-			e.updateTask(t, func(t *Task) {
-				t.Phase = PhaseCanceled
-				t.Message = "已取消"
-			})
+		// 组边界闸门：暂停时在这里阻塞，停止时在这里返回
+		if err := e.gate(ctx); err != nil {
+			stopped = true
+			e.cancelRest(tasks[i:])
+			break
+		}
+		// 继续跑时跳过已经有结论的组（done / skipped / failed）
+		if settledPhase(t.Phase) {
+			e.logf("dim", "  ⤼ 跳过已完成 [%d/%d]：%s × %s",
+				i+1, len(tasks), t.PatternName, t.TemplateName)
 			continue
 		}
+
+		// 组开始前落盘：这时若被强杀，这一组会重跑（比漏跑安全）
+		e.markRunning(t)
+		e.saveQueue(opt)
+
 		// 预检：同一个图案只判一次（多模板时后续组直接复用记录库里的结论）
 		if skip := e.precheckOne(ctx, def, jc, t, i+1, len(tasks)); skip {
+			e.saveQueue(opt)
 			continue
 		}
-		e.processOne(ctx, opt, def, jc, t, outRoot, i+1, len(tasks))
+		e.processFn(e, ctx, opt, def, jc, t, outRoot, i+1, len(tasks))
+		// 组结束后落盘：强杀恢复时能准确知道这组已完成
+		e.saveQueue(opt)
+	}
+}
+
+// markRunning 把即将执行的组标成「运行中」，让前端立刻看到进度归属。
+func (e *Engine) markRunning(t *Task) {
+	e.updateTask(t, func(t *Task) {
+		if settledPhase(t.Phase) {
+			return
+		}
+		t.Phase = PhasePattern
+		t.Progress = 1
+		t.Message = "开始处理"
+	})
+}
+
+// cancelRest 把还没跑到的组标成已取消，并保留已完成的图。
+func (e *Engine) cancelRest(rest []*Task) {
+	for _, t := range rest {
+		if settledPhase(t.Phase) {
+			continue
+		}
+		e.updateTask(t, func(t *Task) {
+			t.Phase = PhaseCanceled
+			t.Message = "已取消"
+		})
 	}
 }
 
@@ -590,104 +942,180 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		e.logf("dim", "  图案 %dx%d", pr.Width, pr.Height)
 	}
 
-	// 2) Photoshop 渲染各档候选
-	e.updateTask(t, func(t *Task) {
-		t.Phase = PhaseRender
-		t.Progress = 20
-		t.Message = "Photoshop 渲染候选"
-	})
-
-	// 模板复制到临时目录：原模板永不被打开或修改
-	tplCopy := filepath.Join(tmp, "tpl.tif")
-	if err := copyFile(t.Template, tplCopy); err != nil {
-		e.failTask(t, fmt.Errorf("复制模板: %w", err))
-		return
+	// 2) 多轮参数微调
+	//    第一轮用候选档位让视觉模型挑，之后每轮按评审建议用单档重渲，
+	//    直到模型说「够了」、调不动、或到达 max_rounds 上限。
+	//    关闭自动判断或 auto_tune_on 时退化为原来的单轮行为。
+	tc := tuner.Config{
+		BaseURL:      def.BaseURL,
+		APIKey:       def.APIKey,
+		Model:        def.Model,
+		MaxTokens:    def.MaxTokens,
+		Timeout:      time.Duration(def.TimeoutSec) * time.Second,
+		Temperature:  def.Temperature,
+		ImageMaxSide: def.ImageMaxSide,
+		Thinking:     def.Thinking,
+	}
+	rounds := 1
+	if opt.Auto && def.AutoTuneOn && def.MaxRounds > 1 {
+		rounds = def.MaxRounds
 	}
 
 	scales := opt.Scales
-	req := psx.RenderRequest{
-		TemplateCopy: tplCopy,
-		Pattern:      patPath,
-		Group:        opt.Group,
-		Fit:          opt.Fit,
-		Scales:       scales,
-		OffsetX:      opt.OffsetX,
-		OffsetY:      opt.OffsetY,
-		OutDir:       tmp,
-	}
-	log, err := e.ps.Render(req)
-	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			e.logf("dim", "  %s", line)
-		}
-	}
-	if err != nil {
-		e.failTask(t, fmt.Errorf("Photoshop 渲染: %w", err))
-		return
-	}
+	offX, offY := opt.OffsetX, opt.OffsetY
+	var (
+		flatPick    string        // 最终选中的拼合图
+		chosenScale float64       // 最终填充倍数
+		chosenNote  string        // 最终选档理由
+		hist        []tuner.Round // 各轮评审记录，供界面展示
+	)
 
-	// 收集实际产出的拼合图。
-	// flatIdx 记录 flats[i] 对应的档位下标：某档没产出时不能靠位置对齐，
-	// 否则 flats[1] 会错配成 scales[1] 而它其实是 scales[2]。
-	var flats []string
-	var flatIdx []int
-	for i := range scales {
-		p := req.FlatPath(i)
-		if _, err := os.Stat(p); err == nil {
-			flats = append(flats, p)
-			flatIdx = append(flatIdx, i)
-		}
-	}
-	if len(flats) == 0 {
-		e.failTask(t, fmt.Errorf("拼合图未生成"))
-		return
-	}
-
-	// 3) 视觉模型选档
-	e.updateTask(t, func(t *Task) {
-		t.Phase = PhaseJudge
-		t.Progress = 60
-		t.Message = "视觉模型判断摆放"
-	})
-
-	// pick 是 flats 的下标（不是 scales 的下标）。
-	// 某档拼合图缺失时 flats 比 scales 短，两者下标不能混用。
-	pick := 0
-	if opt.Auto && len(flats) > 1 {
-		cands := make([]judge.Candidate, 0, len(flats))
-		var idxFlat []int // cands[i] 对应 flats 的哪个下标
-		for i, f := range flats {
-			jpg, err := imgutil.FirstCellJPEG(f, opt.CellSize, def.ImageMaxSide, 90)
-			if err != nil {
-				e.logf("warn", "  预览图生成失败 %s: %v", filepath.Base(f), err)
-				continue
-			}
-			cands = append(cands, judge.Candidate{JPEG: jpg, Scale: scales[flatIdx[i]]})
-			idxFlat = append(idxFlat, i)
-		}
-		if len(cands) > 1 {
-			res := judge.Choose(jc, cands, t.PatternName)
-			if res.Pick >= 0 && res.Pick < len(idxFlat) {
-				pick = idxFlat[res.Pick]
-			}
-			chosen := scales[flatIdx[pick]]
-			if res.Fallback {
-				e.logf("warn", "  视觉模型判断失败，回退 x%.2f: %v", chosen, res.Err)
+	for round := 1; ; round++ {
+		e.updateTask(t, func(t *Task) {
+			t.Phase = PhaseRender
+			t.Progress = 20
+			if round > 1 {
+				t.Message = fmt.Sprintf("第 %d 轮渲染", round)
 			} else {
-				e.logf("info", "  模型选第 %d 档 (x%.2f) %s", flatIdx[pick]+1, chosen, res.Reason)
+				t.Message = "Photoshop 渲染候选"
 			}
-			e.updateTask(t, func(t *Task) {
-				t.JudgeNote = res.Reason
-			})
-		} else {
-			pick = idxFlat[0]
-			e.logf("warn", "  可用预览图不足，跳过模型判断，用 x%.2f", scales[flatIdx[pick]])
+		})
+
+		// 模板复制到临时目录：原模板永不被打开或修改
+		tplCopy := filepath.Join(tmp, "tpl.tif")
+		if err := copyFile(t.Template, tplCopy); err != nil {
+			e.failTask(t, fmt.Errorf("复制模板: %w", err))
+			return
 		}
-	} else {
-		e.logf("info", "  固定档位 x%.2f", scales[flatIdx[0]])
+
+		req := psx.RenderRequest{
+			TemplateCopy: tplCopy,
+			Pattern:      patPath,
+			Group:        opt.Group,
+			Fit:          opt.Fit,
+			Scales:       scales,
+			OffsetX:      offX,
+			OffsetY:      offY,
+			OutDir:       tmp,
+			PSVersion:    def.PSVersion,
+		}
+		log, err := e.ps.Render(req)
+		for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				e.logf("dim", "  %s", line)
+			}
+		}
+		if err != nil {
+			e.failTask(t, fmt.Errorf("Photoshop 渲染: %w", err))
+			return
+		}
+
+		// 收集实际产出的拼合图。
+		// flatIdx 记录 flats[i] 对应的档位下标：某档没产出时不能靠位置对齐，
+		// 否则 flats[1] 会错配成 scales[1] 而它其实是 scales[2]。
+		var flats []string
+		var flatIdx []int
+		for i := range scales {
+			p := req.FlatPath(i)
+			if _, err := os.Stat(p); err == nil {
+				flats = append(flats, p)
+				flatIdx = append(flatIdx, i)
+			}
+		}
+		if len(flats) == 0 {
+			e.failTask(t, fmt.Errorf("拼合图未生成"))
+			return
+		}
+
+		// 3) 视觉模型选档
+		e.updateTask(t, func(t *Task) {
+			t.Phase = PhaseJudge
+			t.Progress = 60
+			t.Message = "视觉模型判断摆放"
+		})
+
+		// pick 是 flats 的下标（不是 scales 的下标）。
+		// 某档拼合图缺失时 flats 比 scales 短，两者下标不能混用。
+		pick := 0
+		if opt.Auto && len(flats) > 1 {
+			cands := make([]judge.Candidate, 0, len(flats))
+			var idxFlat []int // cands[i] 对应 flats 的哪个下标
+			for i, f := range flats {
+				jpg, err := imgutil.FirstCellJPEG(f, opt.CellSize, def.ImageMaxSide, 90)
+				if err != nil {
+					e.logf("warn", "  预览图生成失败 %s: %v", filepath.Base(f), err)
+					continue
+				}
+				cands = append(cands, judge.Candidate{JPEG: jpg, Scale: scales[flatIdx[i]]})
+				idxFlat = append(idxFlat, i)
+			}
+			if len(cands) > 1 {
+				res := judge.Choose(jc, cands, t.PatternName)
+				if res.Pick >= 0 && res.Pick < len(idxFlat) {
+					pick = idxFlat[res.Pick]
+				}
+				if res.Fallback {
+					e.logf("warn", "  视觉模型判断失败，回退 x%.2f: %v", scales[flatIdx[pick]], res.Err)
+				} else {
+					chosenNote = res.Reason
+					e.logf("info", "  模型选第 %d 档 (x%.2f) %s", flatIdx[pick]+1, scales[flatIdx[pick]], res.Reason)
+				}
+			} else {
+				pick = idxFlat[0]
+				e.logf("warn", "  可用预览图不足，跳过模型判断，用 x%.2f", scales[flatIdx[pick]])
+			}
+		} else {
+			e.logf("info", "  固定档位 x%.2f", scales[flatIdx[0]])
+		}
+
+		flatPick = flats[pick]
+		chosenScale = scales[flatIdx[pick]]
+
+		cur := tuner.Round{Index: round, Scale: chosenScale, OffsetX: offX, OffsetY: offY}
+
+		// 最后一轮不再评审，直接出图
+		if round >= rounds {
+			hist = append(hist, cur)
+			break
+		}
+
+		// 4) 评审这一轮的成品，决定是否继续微调
+		e.updateTask(t, func(t *Task) {
+			t.Phase = PhaseTune
+			t.Progress = 72
+			t.Message = fmt.Sprintf("第 %d 轮评审微调", round)
+		})
+
+		jpg, err := imgutil.FirstCellJPEG(flatPick, opt.CellSize, def.ImageMaxSide, 90)
+		if err != nil {
+			e.logf("warn", "  评审图生成失败，结束微调: %v", err)
+			hist = append(hist, cur)
+			break
+		}
+		adv := tuner.Critique(tc, jpg)
+		cur.Score = adv.Score
+		cur.Problem = adv.Problem
+		cur.Good = adv.Good
+		hist = append(hist, cur)
+
+		if adv.Fallback {
+			e.logf("warn", "  评审模型调用失败，结束微调: %v", adv.Err)
+			break
+		}
+		nextScale, nx, ny, iterate := tuner.Plan(adv, chosenScale, offX, offY)
+		if !iterate {
+			e.logf("info", "  第 %d 轮评审 %d 分：%s → 不再调整", round, adv.Score, adv.Problem)
+			break
+		}
+		e.logf("info", "  第 %d 轮评审 %d 分：%s → %s x%.2f 偏移(%+.2f,%+.2f)",
+			round, adv.Score, adv.Problem, adv.Direction, nextScale, nx, ny)
+
+		// 下一轮只渲这一档，省 PS 与模型额度
+		scales = []float64{nextScale}
+		offX, offY = nx, ny
 	}
 
-	// 4) 切格导出
+	// 5) 切格导出
 	e.updateTask(t, func(t *Task) {
 		t.Phase = PhaseExport
 		t.Progress = 80
@@ -695,7 +1123,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	})
 
 	outDir := filepath.Join(outRoot, t.PatternName)
-	files, err := imgutil.SplitCells(flats[pick], outDir, t.PatternName, t.TemplateName,
+	files, err := imgutil.SplitCells(flatPick, outDir, t.PatternName, t.TemplateName,
 		opt.CellSize, opt.JPGQuality)
 	if err != nil {
 		e.failTask(t, fmt.Errorf("切格导出: %w", err))
@@ -713,7 +1141,11 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		t.Message = fmt.Sprintf("生成 %d 张", len(files))
 		t.Files = files
 		t.OutputDir = outDir
-		t.ChosenScale = scales[flatIdx[pick]]
+		if chosenNote != "" {
+			t.JudgeNote = chosenNote
+		}
+		t.ChosenScale = chosenScale
+		t.TuneRounds = len(hist)
 		t.ElapsedMS = elapsed.Milliseconds()
 	})
 	e.logf("ok", "  ✓ %d 张 → %s（%.1fs）", len(files), outDir, elapsed.Seconds())
@@ -730,9 +1162,20 @@ func (e *Engine) failTask(t *Task, err error) {
 	})
 	e.logf("err", "  ✗ %s × %s: %v", t.PatternName, t.TemplateName, err)
 	// 出错后清掉 PS 残留文档，避免影响后续任务
-	if e2 := e.ps.CloseAllDocs(); e2 != nil {
+	if e2 := e.closeDocs(); e2 != nil {
 		e.logf("warn", "  清理 Photoshop 文档失败: %v", e2)
 	}
+}
+
+// closeDocs 清掉 Photoshop 残留文档。
+//
+// 单独包一层是为了让单测能在没有 Photoshop 的情况下跑调度逻辑：
+// ps 为 nil 时直接跳过，而不是空指针崩溃。
+func (e *Engine) closeDocs() error {
+	if e.ps == nil {
+		return nil
+	}
+	return e.ps.CloseAllDocs()
 }
 
 func (e *Engine) updateTask(t *Task, fn func(*Task)) {

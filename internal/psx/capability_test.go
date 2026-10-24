@@ -116,16 +116,16 @@ func TestForLegacyLacksSmartObject(t *testing.T) {
 // TestParseMajor 守住版本号解析的容错：前后空白、v 前缀、括号后缀。
 func TestParseMajor(t *testing.T) {
 	cases := map[string]int{
-		"27.7.0":                 27,
-		"v27.7":                  27,
-		"V27":                    27,
-		" 27 ":                   27,
+		"27.7.0":                   27,
+		"v27.7":                    27,
+		"V27":                      27,
+		" 27 ":                     27,
 		"27.7.0 (20250610.m.2200)": 27,
-		"13":                     13,
-		"":                       0,
-		"   ":                    0,
-		"abc":                    0,
-		"v":                      0,
+		"13":                       13,
+		"":                         0,
+		"   ":                      0,
+		"abc":                      0,
+		"v":                        0,
 	}
 	for in, want := range cases {
 		if got := parseMajor(in); got != want {

@@ -14,7 +14,7 @@ import (
 // 发布流程：改这里的版本号 → 同步 CHANGELOG.md → 打同名 tag（如 v0.2.0）。
 // 自动更新检查拿它和 GitHub 最新 release 的 tag 比较；cmd/probe 与构建脚本
 // 也读它，任何地方都不要另写字面量版本号。
-var Version = "0.2.0"
+var Version = "0.3.0"
 
 //go:embed all:frontend/dist
 var assets embed.FS

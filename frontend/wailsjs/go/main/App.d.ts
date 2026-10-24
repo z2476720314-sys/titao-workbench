@@ -7,15 +7,23 @@ import {jobs} from '../models';
 import {psx} from '../models';
 import {cfg} from '../models';
 
+export function AppVersion():Promise<string>;
+
 export function CancelRun():Promise<void>;
 
 export function CheckPhotoshop():Promise<main.PSStatus>;
+
+export function CheckUpdate():Promise<main.UpdateInfo>;
+
+export function ClearQueue():Promise<void>;
 
 export function GenModes():Promise<Array<Record<string, string>>>;
 
 export function GenStatus():Promise<Record<string, any>>;
 
 export function GetConfig():Promise<Record<string, any>>;
+
+export function InstallUpdate():Promise<string>;
 
 export function ListDir(arg1:string,arg2:string):Promise<Array<main.FileEntry>>;
 
@@ -31,7 +39,13 @@ export function OpenOutputDir():Promise<void>;
 
 export function OpenPath(arg1:string):Promise<void>;
 
+export function PSCaps():Promise<Record<string, any>>;
+
 export function PauseGen():Promise<void>;
+
+export function PauseRun():Promise<void>;
+
+export function PendingQueue():Promise<jobs.Queue>;
 
 export function PickGenRefs():Promise<Array<string>>;
 
@@ -57,6 +71,8 @@ export function ProbeTemplate(arg1:string):Promise<psx.TemplateInfo>;
 
 export function ResumeGen():Promise<void>;
 
+export function ResumeRun():Promise<void>;
+
 export function RevealInExplorer(arg1:string):Promise<void>;
 
 export function RunStatus():Promise<Record<string, any>>;
@@ -68,3 +84,5 @@ export function StartGen(arg1:genjobs.Options):Promise<void>;
 export function StartRun(arg1:jobs.Options):Promise<void>;
 
 export function StopGen():Promise<void>;
+
+export function StopRun():Promise<void>;

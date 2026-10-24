@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -18,6 +19,7 @@ import (
 	"titao/internal/imgutil"
 	"titao/internal/jobs"
 	"titao/internal/psx"
+	"titao/internal/updater"
 )
 
 // App 是绑定到前端的门面。
@@ -274,20 +276,72 @@ func (a *App) StartRun(opt jobs.Options) error {
 	return a.eng.Start(opt)
 }
 
-// CancelRun 停止当前运行。
+// CancelRun 停止当前运行（旧入口，等价于 StopRun）。
 func (a *App) CancelRun() {
 	if a.eng != nil {
 		a.eng.Cancel()
 	}
 }
 
+// PauseRun 暂停当前运行：当前这组做完就停在组边界。
+func (a *App) PauseRun() error {
+	if a.eng == nil {
+		return fmt.Errorf("引擎未初始化")
+	}
+	return a.eng.Pause()
+}
+
+// ResumeRun 继续运行。
+//
+// 两种情形都走这里：暂停后解闸门；程序重启后发现 queue.json 还有没做完的组，
+// 则从队列恢复任务列表，只补跑剩下的。
+func (a *App) ResumeRun() error {
+	if a.eng == nil {
+		return fmt.Errorf("引擎未初始化")
+	}
+	a.mu.Lock()
+	st := a.psStatus
+	a.mu.Unlock()
+	if !st.Available {
+		go a.checkPS()
+		return fmt.Errorf("Photoshop 未就绪：%s", firstNonEmpty(st.Error, "请先启动 Photoshop 一次"))
+	}
+	return a.eng.Resume()
+}
+
+// StopRun 停止当前运行：当前这组做完就收尾，未执行的组标 canceled。
+func (a *App) StopRun() error {
+	if a.eng == nil {
+		return fmt.Errorf("引擎未初始化")
+	}
+	a.eng.Stop()
+	return nil
+}
+
+// PendingQueue 返回上次没跑完的队列（没有则返回 nil）。
+func (a *App) PendingQueue() (*jobs.Queue, error) {
+	if a.eng == nil {
+		return nil, fmt.Errorf("引擎未初始化")
+	}
+	return a.eng.PendingQueue()
+}
+
+// ClearQueue 丢弃上次没跑完的队列。
+func (a *App) ClearQueue() error {
+	if a.eng == nil {
+		return fmt.Errorf("引擎未初始化")
+	}
+	return a.eng.ClearQueue()
+}
+
 // RunStatus 返回运行状态与任务快照。
 func (a *App) RunStatus() map[string]any {
 	if a.eng == nil {
-		return map[string]any{"running": false, "tasks": []*jobs.Task{}}
+		return map[string]any{"running": false, "state": "idle", "tasks": []*jobs.Task{}}
 	}
 	return map[string]any{
 		"running": a.eng.IsRunning(),
+		"state":   string(a.eng.State()),
 		"tasks":   a.eng.Tasks(),
 	}
 }
@@ -508,6 +562,117 @@ func (a *App) GenModes() []map[string]string {
 	return []map[string]string{
 		{"id": string(genimg.ModeHandheld), "label": genimg.ModeHandheld.Label()},
 		{"id": string(genimg.ModeBackground), "label": genimg.ModeBackground.Label()},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 自动更新
+// ---------------------------------------------------------------------------
+
+// UpdateInfo 是一次更新检查的结果。
+type UpdateInfo struct {
+	Checked bool   `json:"checked"`
+	HasNew  bool   `json:"hasNew"`
+	Current string `json:"current"`
+	Latest  string `json:"latest"`
+	Notes   string `json:"notes"`
+	URL     string `json:"url"`   // release 页面
+	Asset   string `json:"asset"` // 可执行文件下载地址（可能为空）
+	Size    int64  `json:"size"`  // 资产字节数
+	Error   string `json:"error"` // 检查失败原因（静默用，不弹窗）
+}
+
+// CheckUpdate 查一次 GitHub 最新 release。
+//
+// 全程静默失败：网络不通、被限流、仓库 404 都只把原因塞进 Error，
+// 由前端决定要不要显示。启动时后台调用一次，不阻塞界面。
+func (a *App) CheckUpdate() UpdateInfo {
+	info := UpdateInfo{Checked: true, Current: Version}
+	if a.store != nil && !a.store.Get().UpdateCheck {
+		info.Error = "已在设置里关闭自动检查更新"
+		return info
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	rel, err := updater.CheckLatest(ctx)
+	if err != nil {
+		info.Error = err.Error()
+		return info
+	}
+	info.Latest = rel.TagName
+	info.Notes = rel.Body
+	info.URL = rel.HTMLURL
+	info.HasNew = updater.IsNewer(Version, rel.TagName)
+
+	// 优先找 .exe 资产；没有就退化成「只提示，让用户自己下」
+	if as := rel.AssetSuffix(".exe"); as != nil {
+		info.Asset = as.BrowserDownloadURL
+		info.Size = as.Size
+	}
+	return info
+}
+
+// InstallUpdate 下载最新 exe 并安排替换当前程序。
+//
+// 流程：下载到临时目录 → 校验大小 → 写一个延迟替换脚本 → 提示用户重启。
+// exe 运行中不能覆盖自身，所以真正的替换由脚本在进程退出后完成。
+func (a *App) InstallUpdate() (string, error) {
+	info := a.CheckUpdate()
+	if !info.HasNew {
+		if info.Error != "" {
+			return "", fmt.Errorf("检查更新失败：%s", info.Error)
+		}
+		return "", fmt.Errorf("已是最新版本 %s", info.Current)
+	}
+	if info.Asset == "" {
+		return "", fmt.Errorf("最新版本 %s 没有提供可下载的 exe，请到 %s 手动下载", info.Latest, info.URL)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("定位当前程序: %w", err)
+	}
+	tmpDir := filepath.Join(os.TempDir(), "titao-update")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return "", fmt.Errorf("创建临时目录: %w", err)
+	}
+	newExe := filepath.Join(tmpDir, "titao-new.exe")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := updater.Download(ctx, info.Asset, newExe); err != nil {
+		return "", fmt.Errorf("下载更新: %w", err)
+	}
+	if st, err := os.Stat(newExe); err != nil {
+		return "", fmt.Errorf("下载后找不到文件: %w", err)
+	} else if info.Size > 0 && st.Size() != info.Size {
+		return "", fmt.Errorf("下载不完整：期望 %d 字节，实际 %d 字节", info.Size, st.Size())
+	}
+	if err := updater.ApplyReplace(exe, newExe); err != nil {
+		return "", fmt.Errorf("安排替换: %w", err)
+	}
+	return fmt.Sprintf("已下载 %s，替换脚本已就绪。关闭程序后会自动替换，重新打开即为新版本。", info.Latest), nil
+}
+
+// AppVersion 返回当前程序版本号。
+func (a *App) AppVersion() string { return Version }
+
+// PSCaps 返回当前 Photoshop 的能力诊断（版本自适应结果）。
+func (a *App) PSCaps() map[string]any {
+	a.mu.Lock()
+	ver := a.psStatus.Version
+	a.mu.Unlock()
+	c := psx.For(ver)
+	return map[string]any{
+		"version":         c.Version,
+		"major":           c.Major,
+		"verified":        c.Verified,
+		"doJavaScript":    c.DoJavaScript,
+		"noDialogs":       c.NoDialogs,
+		"editSmartObject": c.EditSmartObject,
+		"replaceContents": c.ReplaceContents,
+		"summary":         c.Summary(),
+		"notes":           c.Notes,
 	}
 }
 

@@ -6,7 +6,10 @@
 
   // ---------------- 视图 ----------------
   type View = 'run' | 'tasks' | 'gen' | 'outputs' | 'settings' | 'about'
-  let view: View = 'run'
+  const VIEW_IDS: View[] = ['run', 'tasks', 'gen', 'outputs', 'settings', 'about']
+  // 支持 ?view=tasks 之类的直达链接（浏览器审查用）；桌面端不带参数时仍是「套图」页。
+  const startView = new URLSearchParams(location.search).get('view') as View | null
+  let view: View = startView && VIEW_IDS.includes(startView) ? startView : 'run'
   const NAV: { id: View; label: string; icon: string }[] = [
     { id: 'run', label: '套图', icon: 'M4 6h16M4 12h16M4 18h10' },
     { id: 'tasks', label: '任务队列', icon: 'M4 7h16M4 12h16M4 17h7' },
@@ -19,6 +22,13 @@
   // ---------------- 状态 ----------------
   let psStatus: any = { available: false, version: '', error: '', checked: false }
   let psChecking = true
+  let psCaps: any = null
+
+  // 版本与更新
+  let appVersion = ''
+  let upd: any = { checked: false, hasNew: false, current: '', latest: '', notes: '', url: '', asset: '', size: 0, error: '' }
+  let updBusy = false
+  let updDismissed = false
 
   // 套图参数
   let patternPaths: string[] = []
@@ -42,6 +52,15 @@
   let failedCount = 0
   let logs: { t: string; lvl: string; m: string }[] = []
   let logBox: HTMLElement
+
+  // 派生计数：任务表里各终态各有多少组
+  $: skipCount = tasks.filter((t) => t.phase === 'canceled' || t.phase === 'skipped').length
+
+  // 三态运行控制：idle / running / paused / stopping
+  let runState = 'idle'
+  let actLoading = false
+  // 重启后发现的上次残局（queue.json 里还有没结论的组）
+  let pendingQueue: any = null
 
   // 配置
   let conf: any = null
@@ -186,6 +205,10 @@
   async function pauseGen() {
     try {
       await api.PauseGen()
+      // 引擎只发一条 log，前端必须自己盖章，否则按钮永远停在「暂停」。
+      genState = 'paused'
+      genRunning = true
+      notify('info', '已暂停：当前这张生成完就停住')
     } catch (e: any) {
       notify('err', String(e))
     }
@@ -194,14 +217,22 @@
   async function resumeGen() {
     try {
       await api.ResumeGen()
+      genState = 'running'
+      genRunning = true
+      notify('info', '已继续')
     } catch (e: any) {
       notify('err', String(e))
     }
   }
 
   async function stopGen() {
-    await api.StopGen()
-    notify('info', '已请求停止，当前这张处理完就停')
+    try {
+      await api.StopGen()
+      genState = 'stopping'
+      notify('info', '已请求停止，当前这张处理完就停')
+    } catch (e: any) {
+      notify('err', String(e))
+    }
   }
 
   async function loadGenerated() {
@@ -256,7 +287,11 @@
     loadConfig()
     refreshPS()
     refreshStatus()
+    refreshQueue()
     refreshGen()
+    checkUpdate()
+    loadCaps()
+    if (view === 'outputs') loadOutputs()
     const off = EventsOn('titao:event', (ev: any) => onEvent(ev))
     const offGen = EventsOn('titao:gen', (ev: any) => onGenEvent(ev))
     return () => {
@@ -285,6 +320,35 @@
     }
   }
 
+  async function checkUpdate() {
+    try {
+      appVersion = await api.AppVersion()
+      const r: any = await api.CheckUpdate()
+      upd = r || upd
+    } catch (e: any) {
+      // 更新检查全程静默：失败不打扰用户
+    }
+  }
+
+  async function loadCaps() {
+    try {
+      psCaps = await api.PSCaps()
+    } catch (e: any) {
+      psCaps = null
+    }
+  }
+
+  async function doInstallUpdate() {
+    updBusy = true
+    try {
+      const msg = await api.InstallUpdate()
+      notify('ok', msg)
+    } catch (e: any) {
+      notify('err', '更新失败：' + e)
+    }
+    updBusy = false
+  }
+
   async function refreshPS() {
     psChecking = true
     try {
@@ -293,6 +357,7 @@
       psStatus = { available: false, version: '', error: String(e), checked: true }
     }
     psChecking = false
+    loadCaps()
   }
 
   async function refreshStatus() {
@@ -300,9 +365,20 @@
       const r: any = await api.RunStatus()
       tasks = r.tasks || []
       running = r.running
+      runState = r.state || (r.running ? 'running' : 'idle')
       doneCount = tasks.filter((t) => t.phase === 'done').length
       failedCount = tasks.filter((t) => t.phase === 'failed').length
     } catch {}
+  }
+
+  /** 查一次上次没跑完的队列；只有空闲时才有意义（运行中不打扰）。 */
+  async function refreshQueue() {
+    try {
+      const q: any = await api.PendingQueue()
+      pendingQueue = q && q.pending > 0 && !q.finished ? q : null
+    } catch {
+      pendingQueue = null
+    }
   }
 
   // ---------------- 事件 ----------------
@@ -328,15 +404,34 @@
       doneCount = ev.done ?? doneCount
       failedCount = ev.failed ?? failedCount
       running = true
+      if (ev.state) runState = ev.state
       return
     }
     if (ev.type === 'done') {
       running = false
+      runState = ev.state || 'idle'
       doneCount = ev.done ?? doneCount
       failedCount = ev.failed ?? failedCount
       notify(ev.failed > 0 ? 'warn' : 'info', ev.message)
       if (view === 'outputs') loadOutputs()
+      refreshQueue()
+      maybeAutoGen()
     }
+  }
+
+  // 套图跑完后按配置自动接着生图（gen_auto_run，默认关）。
+  async function maybeAutoGen() {
+    if (!conf?.gen_auto_run) return
+    if (!genHasKey || genRunning) return
+    const refs: string[] = []
+    for (const t of tasks) {
+      if (t.phase !== 'done') continue
+      for (const f of t.files || []) refs.push(f)
+    }
+    if (!refs.length) return
+    genRefs = uniq(refs)
+    notify('info', `套图完成，接着生图：${genRefs.length} 张参考图 × ${genModes.length} 模式 × ${Number(genCount) || 2} 张`)
+    await startGen()
   }
 
   // ---------------- 路径操作 ----------------
@@ -456,15 +551,70 @@
     try {
       await api.StartRun(opt as any)
       running = true
+      runState = 'running'
+      pendingQueue = null
       view = 'tasks'
     } catch (e: any) {
       notify('err', String(e))
     }
   }
 
-  async function cancelRun() {
-    await api.CancelRun()
-    notify('info', '已请求停止，当前这张处理完就停')
+  /** 暂停：当前这组跑完才停，所以按钮立刻进入 paused 态等它收尾。 */
+  async function pauseRun() {
+    if (actLoading) return
+    actLoading = true
+    try {
+      await api.PauseRun()
+      runState = 'paused'
+      notify('info', '已暂停：当前这张做完就停在组边界')
+    } catch (e: any) {
+      notify('err', String(e))
+    }
+    actLoading = false
+  }
+
+  /** 继续：暂停后解闸门；重启后发现残局则从队列补跑。 */
+  async function resumeRun() {
+    if (actLoading) return
+    actLoading = true
+    try {
+      await api.ResumeRun()
+      runState = 'running'
+      running = true
+      pendingQueue = null
+      view = 'tasks'
+      notify('info', '已继续')
+    } catch (e: any) {
+      notify('err', String(e))
+    }
+    actLoading = false
+  }
+
+  async function stopRun() {
+    if (actLoading) return
+    actLoading = true
+    try {
+      await api.StopRun()
+      runState = 'stopping'
+      notify('info', '已请求停止：当前这张做完就收尾，未执行的组标为已取消')
+    } catch (e: any) {
+      notify('err', String(e))
+    }
+    actLoading = false
+  }
+
+  /** 丢弃上次没跑完的队列，从干净状态重新开始。 */
+  async function clearQueue() {
+    try {
+      await api.ClearQueue()
+      pendingQueue = null
+      tasks = []
+      doneCount = 0
+      failedCount = 0
+      notify('info', '已清理上次未完成的任务')
+    } catch (e: any) {
+      notify('err', String(e))
+    }
   }
 
   // ---------------- 成品 ----------------
@@ -548,9 +698,11 @@
 
   const phaseLabel: Record<string, string> = {
     pending: '等待',
+    precheck: '视觉预检',
     pattern: '规范化',
     render: 'PS 渲染',
     judge: '模型判断',
+    tune: '评审微调',
     export: '导出',
     done: '完成',
     failed: '失败',
@@ -566,6 +718,8 @@
     return 'pill run'
   }
 </script>
+
+<svelte:window on:keydown={(e) => { if (e.key === 'Escape' && zoom) zoom = null }} />
 
 <div class="shell">
   <!-- ================= 侧栏 ================= -->
@@ -599,6 +753,7 @@
         {:else if psStatus.available}PS {psStatus.version}
         {:else}未连接{/if}
       </span>
+      {#if appVersion}<span class="ver">v{appVersion}</span>{/if}
     </div>
   </aside>
 
@@ -606,6 +761,39 @@
   <main class="main">
     {#if notice}
       <div class="notice {noticeKind}">{notice}</div>
+    {/if}
+
+    <!-- 有新版本：只提示，不自动下载，用户点了才更新 -->
+    {#if upd.hasNew && !updDismissed}
+      <div class="notice ok" style="display:flex;align-items:center;gap:10px">
+        <span style="flex:1">
+          发现新版本 <b>{upd.latest}</b>（当前 {upd.current}）。
+          {#if upd.asset}可以直接下载替换；{:else}该版本没有提供 exe，请到发布页手动下载。{/if}
+        </span>
+        {#if upd.asset}
+          <button class="primary" on:click={doInstallUpdate} disabled={updBusy}>
+            {updBusy ? '下载中…' : '下载并更新'}
+          </button>
+        {/if}
+        {#if upd.url}
+          <button on:click={() => api.OpenPath(upd.url)}>发布页</button>
+        {/if}
+        <button class="ghost" on:click={() => (updDismissed = true)}>忽略</button>
+      </div>
+    {/if}
+
+    <!-- 上次没跑完的残局：程序被关掉/强杀过，queue.json 里还有待跑的组 -->
+    {#if pendingQueue && (runState === 'idle' || runState === '')}
+      <div class="notice warn" style="display:flex;align-items:center;gap:10px">
+        <span style="flex:1">
+          发现未完成的任务：上次共 {pendingQueue.tasks?.length || 0} 组，还有
+          <b>{pendingQueue.pending}</b> 组没跑完（已完成
+          {(pendingQueue.tasks?.length || 0) - pendingQueue.pending} 组）。
+          继续只补跑剩下的，不会重跑已出图的组。
+        </span>
+        <button class="primary" on:click={resumeRun} disabled={actLoading}>继续</button>
+        <button on:click={clearQueue}>清理</button>
+      </div>
     {/if}
 
     <!-- ---------- 套图 ---------- -->
@@ -807,10 +995,21 @@
 
       <div class="actionbar">
         <button class="primary" on:click={startRun} disabled={running || !patternPaths.length || !templatePaths.length || !psStatus.available}>
-          {running ? '运行中…' : '开始套图'}
+          {runState === 'running' ? '运行中…' : runState === 'paused' ? '已暂停' : runState === 'stopping' ? '正在停止…' : '开始套图'}
         </button>
-        {#if running}
-          <button class="danger" on:click={cancelRun}>停止</button>
+        {#if runState === 'running'}
+          <button on:click={pauseRun} disabled={actLoading}>暂停</button>
+        {/if}
+        {#if runState === 'paused'}
+          <button class="primary" on:click={resumeRun} disabled={actLoading}>继续</button>
+        {/if}
+        {#if runState === 'running' || runState === 'paused'}
+          <button class="danger" on:click={stopRun} disabled={actLoading}>停止</button>
+        {/if}
+        {#if runState !== 'idle' && runState !== ''}
+          <span class={runState === 'paused' ? 'pill warn' : runState === 'stopping' ? 'pill warn' : 'pill run'}>
+            {runState === 'paused' ? '已暂停' : runState === 'stopping' ? '正在停止' : '运行中'} {doneCount}/{tasks.length}
+          </span>
         {/if}
         <span class="spacer"></span>
         <span style="font-size:11px;color:var(--muted)">
@@ -827,10 +1026,19 @@
           <div class="page-desc">每个「图案 × 模板」是一个组合，串行执行（Photoshop 不能并发驱动）。</div>
         </div>
         <div class="row">
-          {#if running}
-            <button class="danger" on:click={cancelRun}>停止</button>
+          {#if runState === 'running'}
+            <button on:click={pauseRun} disabled={actLoading}>暂停</button>
+          {/if}
+          {#if runState === 'paused'}
+            <button class="primary" on:click={resumeRun} disabled={actLoading}>继续</button>
+          {/if}
+          {#if runState === 'running' || runState === 'paused'}
+            <button class="danger" on:click={stopRun} disabled={actLoading}>停止</button>
           {/if}
           <button on:click={refreshStatus}>刷新</button>
+          {#if (runState === 'idle' || runState === '') && tasks.length > 0}
+            <button on:click={clearQueue}>清理记录</button>
+          {/if}
         </div>
       </div>
 
@@ -841,7 +1049,12 @@
           <div class="stat"><span class="v" style="color:var(--error)">{failedCount}</span><span class="k">失败</span></div>
           <div class="stat"><span class="v">{tasks.reduce((a, t) => a + (t.files?.length || 0), 0)}</span><span class="k">产出 JPG</span></div>
           <span class="spacer"></span>
-          {#if running}<span class="pill run">运行中</span>{/if}
+          {#if runState === 'running'}<span class="pill run">运行中 {doneCount}/{tasks.length}</span>{/if}
+          {#if runState === 'paused'}<span class="pill warn">已暂停 {doneCount}/{tasks.length}</span>{/if}
+          {#if runState === 'stopping'}<span class="pill warn">正在停止…</span>{/if}
+          {#if (runState === 'idle' || runState === '') && skipCount > 0}
+            <span class="pill warn">已停止 {doneCount}/{tasks.length}，跳过 {skipCount}</span>
+          {/if}
         </div>
 
         {#if tasks.length === 0}
@@ -859,6 +1072,7 @@
                 <th style="width:96px">状态</th>
                 <th style="width:150px">进度</th>
                 <th style="width:70px">倍数</th>
+                <th style="width:52px">轮数</th>
                 <th style="width:64px">产出</th>
                 <th style="width:70px">耗时</th>
                 <th style="width:72px"></th>
@@ -881,7 +1095,8 @@
                       {(t.error || t.message || '').slice(0, 40)}
                     </div>
                   </td>
-                  <td class="mono" style="color:var(--muted)">{t.chosenScale ? '×' + t.chosenScale : '—'}</td>
+                  <td class="mono" style="color:var(--muted)" title={t.judgeNote || ''}>{t.chosenScale ? '×' + t.chosenScale : '—'}</td>
+                  <td class="mono" style="color:var(--muted)">{t.tuneRounds || '—'}</td>
                   <td class="mono">{t.files?.length || 0}</td>
                   <td class="mono" style="color:var(--muted)">{t.elapsedMs ? (t.elapsedMs / 1000).toFixed(1) + 's' : '—'}</td>
                   <td>
@@ -1001,7 +1216,7 @@
           </div>
         </div>
 
-        <div class="actionbar" style="margin-top:4px">
+        <div class="actionbar static">
           {#if !genRunning}
             <button class="primary" on:click={startGen} disabled={!genRefs.length || !genModes.length || !genHasKey}>
               开始生图
@@ -1423,6 +1638,72 @@
           </div>
         </section>
 
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">自动微调与预检</div>
+              <div class="card-hint">让视觉模型自己把摆放参数调到合适，并提前剔除不可用的抠图</div>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label class="check-row">
+                <input type="checkbox" bind:checked={conf.auto_tune_on} />
+                <span style="color:var(--text);font-size:12px">启用多轮自动微调</span>
+              </label>
+              <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
+                先出一版，再由视觉模型打分指出「偏大/偏小/偏了」，自动重渲，直到达标或到轮数上限。
+              </div>
+            </div>
+            <div class="field">
+              <span class="lbl">最大迭代轮数</span>
+              <input type="number" min="1" max="3" bind:value={conf.max_rounds} />
+              <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
+                每多一轮多一次 PS 渲染 + 一次模型调用。2 轮通常够用，3 轮最稳但更慢。
+              </div>
+            </div>
+          </div>
+          <div class="grid-2" style="margin-top:12px">
+            <div class="field">
+              <label class="check-row">
+                <input type="checkbox" bind:checked={conf.precheck_on} />
+                <span style="color:var(--text);font-size:12px">套图前视觉预检</span>
+              </label>
+              <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
+                开套图前先判一次抠图：带水印文字、带镜头框/手机壳边框、明显是壳实拍的直接跳过，不浪费渲染。
+              </div>
+            </div>
+            <div class="field">
+              <label class="check-row">
+                <input type="checkbox" bind:checked={conf.precheck_skip} />
+                <span style="color:var(--text);font-size:12px">命中即跳过（不套图）</span>
+              </label>
+              <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
+                关闭时只记录不跳过，仍会套图。判定结果存在 config.json 同目录的 precheck.jsonl，同一张图不会重复送模型。
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">更新</div>
+              <div class="card-hint">从 GitHub Releases 检查新版本</div>
+            </div>
+            <span class={conf.update_check ? 'pill ok' : 'pill'}>{conf.update_check ? '已开启' : '已关闭'}</span>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label class="check-row">
+              <input type="checkbox" bind:checked={conf.update_check} />
+              <span style="color:var(--text);font-size:12px">启动时自动检查更新</span>
+            </label>
+            <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
+              只在后台查一次版本号，不会自动下载或安装；发现新版本会在界面提示，由你决定是否更新。
+            </div>
+          </div>
+        </section>
+
         <div class="actionbar">
           <button class="primary" on:click={saveConf} disabled={savingConf}>
             {savingConf ? '保存中…' : confSaved || '保存设置'}
@@ -1470,13 +1751,59 @@
       </section>
 
       <section class="card">
-        <div class="card-head"><div class="card-title">环境</div></div>
+        <div class="card-head">
+          <div>
+            <div class="card-title">环境</div>
+            <div class="card-hint">首次运行自动探测 Photoshop 版本并适配能力</div>
+          </div>
+          <button on:click={checkUpdate} disabled={updBusy}>检查更新</button>
+        </div>
         <dl class="kv">
           <dt>Photoshop</dt><dd>{psStatus.available ? 'v' + psStatus.version : '未连接'}</dd>
+          <dt>程序版本</dt>
+          <dd>
+            v{appVersion || '—'}
+            {#if upd.hasNew}
+              <span class="pill warn" style="margin-left:6px">有新版本 {upd.latest}</span>
+            {:else if upd.checked && !upd.error}
+              <span class="pill ok" style="margin-left:6px">已是最新</span>
+            {:else if upd.error}
+              <span class="pill" style="margin-left:6px" title={upd.error}>未检查</span>
+            {/if}
+          </dd>
           <dt>配置文件</dt><dd>{confPath}</dd>
           <dt>输出目录</dt><dd>{outputDir}</dd>
         </dl>
       </section>
+
+      {#if psCaps}
+        <section class="card">
+          <div class="card-head">
+            <div>
+              <div class="card-title">Photoshop 能力诊断</div>
+              <div class="card-hint">{psCaps.summary}</div>
+            </div>
+            <span class={psCaps.verified ? 'pill ok' : 'pill warn'}>
+              {psCaps.verified ? '已验证版本' : '未实测版本'}
+            </span>
+          </div>
+          <dl class="kv">
+            <dt>主版本</dt><dd>{psCaps.major || '未知'}</dd>
+            <dt>DoJavaScript</dt><dd>{psCaps.doJavaScript ? '可用' : '不可用'}</dd>
+            <dt>关闭模态对话框</dt><dd>{psCaps.noDialogs ? '可用' : '不可用'}</dd>
+            <dt>编辑智能对象内容</dt><dd>{psCaps.editSmartObject ? '可用' : '不可用'}</dd>
+            <dt>替换智能对象内容</dt>
+            <dd>{psCaps.replaceContents ? '可用' : '不用'}（会破坏原有透视变换，本程序不走这条路）</dd>
+          </dl>
+          {#if psCaps.notes?.length}
+            <ul style="margin:10px 0 0;padding-left:18px;font-size:11px;color:var(--muted);line-height:1.75">
+              {#each psCaps.notes as n}
+                <li>{n}</li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      {/if}
     {/if}
   </main>
 </div>

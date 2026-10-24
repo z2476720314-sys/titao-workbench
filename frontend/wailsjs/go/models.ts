@@ -223,6 +223,79 @@ export namespace jobs {
 	        this.patternName = source["patternName"];
 	    }
 	}
+	export class QueueTask {
+	    id: number;
+	    pattern: string;
+	    template: string;
+	    pattern_name: string;
+	    template_name: string;
+	    phase: string;
+	    files?: string[];
+	    error?: string;
+	    chosen_scale?: number;
+	    elapsed_ms?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new QueueTask(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.pattern = source["pattern"];
+	        this.template = source["template"];
+	        this.pattern_name = source["pattern_name"];
+	        this.template_name = source["template_name"];
+	        this.phase = source["phase"];
+	        this.files = source["files"];
+	        this.error = source["error"];
+	        this.chosen_scale = source["chosen_scale"];
+	        this.elapsed_ms = source["elapsed_ms"];
+	    }
+	}
+	export class Queue {
+	    version: number;
+	    created_at: string;
+	    updated_at?: string;
+	    finished: boolean;
+	    pending: number;
+	    options: Options;
+	    tasks: QueueTask[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Queue(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	        this.finished = source["finished"];
+	        this.pending = source["pending"];
+	        this.options = this.convertValues(source["options"], Options);
+	        this.tasks = this.convertValues(source["tasks"], QueueTask);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class Task {
 	    id: number;
 	    pattern: string;
@@ -237,6 +310,7 @@ export namespace jobs {
 	    error: string;
 	    chosenScale: number;
 	    judgeNote: string;
+	    tuneRounds: number;
 	    elapsedMs: number;
 	
 	    static createFrom(source: any = {}) {
@@ -258,6 +332,7 @@ export namespace jobs {
 	        this.error = source["error"];
 	        this.chosenScale = source["chosenScale"];
 	        this.judgeNote = source["judgeNote"];
+	        this.tuneRounds = source["tuneRounds"];
 	        this.elapsedMs = source["elapsedMs"];
 	    }
 	}
@@ -316,6 +391,34 @@ export namespace main {
 	        this.version = source["version"];
 	        this.error = source["error"];
 	        this.checked = source["checked"];
+	    }
+	}
+	export class UpdateInfo {
+	    checked: boolean;
+	    hasNew: boolean;
+	    current: string;
+	    latest: string;
+	    notes: string;
+	    url: string;
+	    asset: string;
+	    size: number;
+	    error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.checked = source["checked"];
+	        this.hasNew = source["hasNew"];
+	        this.current = source["current"];
+	        this.latest = source["latest"];
+	        this.notes = source["notes"];
+	        this.url = source["url"];
+	        this.asset = source["asset"];
+	        this.size = source["size"];
+	        this.error = source["error"];
 	    }
 	}
 

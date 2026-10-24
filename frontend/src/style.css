@@ -249,6 +249,12 @@ label,
   align-items: center;
   gap: 6px;
 }
+.sidebar-foot .ver {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  opacity: .6;
+}
 .dot {
   width: 6px;
   height: 6px;
@@ -681,6 +687,13 @@ th.mono {
 }
 .actionbar .spacer {
   flex: 1;
+}
+/* 不吸底的按钮条：用于下面还有卡片的页面，避免渐变遮住卡片头 */
+.actionbar.static {
+  position: static;
+  margin: 0;
+  padding: 0;
+  background: none;
 }
 
 /* ---------- 滑块 ---------- */

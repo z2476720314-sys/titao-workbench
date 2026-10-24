@@ -294,6 +294,18 @@ func (e *Engine) reset() {
 	e.mu.Unlock()
 }
 
+// releaseClaim 撤销 Start 里的状态占位。
+//
+// Start 会先占住 StateRunning 再校验参数，校验失败时必须还回去，
+// 否则界面会一直显示「运行中」且再也点不动「开始生图」。
+func (e *Engine) releaseClaim() {
+	e.mu.Lock()
+	if e.state == StateRunning {
+		e.state = StateIdle
+	}
+	e.mu.Unlock()
+}
+
 // validate 校验入参。
 func (e *Engine) validate(opt Options) (Options, error) {
 	if len(opt.Refs) == 0 {
@@ -324,18 +336,26 @@ func (e *Engine) validate(opt Options) (Options, error) {
 
 // Start 启动一轮生图。已在运行时直接报错（双检，避免连点）。
 func (e *Engine) Start(opt Options) error {
+	// 先持锁占位再校验：validate 要读文件、读配置，比较慢。
+	// 如果先检查再解锁去校验，8 个并发 Start 会同时通过检查、各自启动一轮
+	// （实测能稳定复现，任务被跑两遍、产物互相覆盖）。
+	// 占位后任何后来者都会看到 StateRunning 而被拒。
 	e.mu.Lock()
 	if e.state == StateRunning || e.state == StatePaused || e.state == StateStopping {
 		e.mu.Unlock()
 		return fmt.Errorf("生图任务正在运行")
 	}
+	e.state = StateRunning
 	e.mu.Unlock()
 
+	// 校验失败要把占位还回去，否则引擎会永久卡在「运行中」再也起不来。
 	opt, err := e.validate(opt)
 	if err != nil {
+		e.releaseClaim()
 		return err
 	}
 	if e.store != nil && strings.TrimSpace(e.store.Get().GenAPIKey) == "" {
+		e.releaseClaim()
 		return fmt.Errorf("未配置生图 Key（设置 → 生图模型 → API Key）")
 	}
 

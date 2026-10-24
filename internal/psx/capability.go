@@ -175,4 +175,3 @@ func (s *Session) Caps() Caps {
 	}
 	return For(ver)
 }
-
