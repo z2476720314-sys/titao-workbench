@@ -1,0 +1,51 @@
+# 构建产物
+build/bin/
+build/bin/*
+!/build/bin/.gitkeep
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Wails 打包中间产物
+build/windows/installer/*.msi
+build/windows/installer/*.exe
+
+# 前端依赖与构建输出（dist 由 wails build 重新生成后 embed）
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/wailsjs/package.json
+
+# Go 工作区
+vendor/
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地临时文件与备份
+*.bak
+*.bak-*
+*.tmp
+*.log
+*.part
+titao-update.bat
+.config-local.json
+
+# 本地工具配置
+.design-mcp/
+
+# 运行时配置（含用户 API Key，绝不入库）
+config.json
+build/bin/config.json
+
+# 测试与覆盖率
+coverage.out
+coverage.html
