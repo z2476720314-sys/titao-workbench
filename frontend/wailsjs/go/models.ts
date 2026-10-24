@@ -18,6 +18,7 @@ export namespace cfg {
 	    cell_size: number;
 	    jpg_quality: number;
 	    trim_alpha: boolean;
+	    no_crop?: boolean;
 	    offset_x: number;
 	    offset_y: number;
 	    max_rounds: number;
@@ -58,6 +59,7 @@ export namespace cfg {
 	        this.cell_size = source["cell_size"];
 	        this.jpg_quality = source["jpg_quality"];
 	        this.trim_alpha = source["trim_alpha"];
+	        this.no_crop = source["no_crop"];
 	        this.offset_x = source["offset_x"];
 	        this.offset_y = source["offset_y"];
 	        this.max_rounds = source["max_rounds"];
@@ -201,6 +203,8 @@ export namespace jobs {
 	    cellSize: number;
 	    jpgQuality: number;
 	    patternName: string;
+	    maxRounds: number;
+	    noCrop: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Options(source);
@@ -221,6 +225,8 @@ export namespace jobs {
 	        this.cellSize = source["cellSize"];
 	        this.jpgQuality = source["jpgQuality"];
 	        this.patternName = source["patternName"];
+	        this.maxRounds = source["maxRounds"];
+	        this.noCrop = source["noCrop"];
 	    }
 	}
 	export class QueueTask {

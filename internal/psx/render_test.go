@@ -1,6 +1,7 @@
 package psx
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -77,6 +78,22 @@ func TestCheckRenderLogBothKinds(t *testing.T) {
 	for _, want := range []string{"2 个智能对象未被替换", "1 个替换出错", "a", "b", "c"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("错误信息缺少 %q: %s", want, msg)
+		}
+	}
+}
+
+// TestRenderJSXHonoursNoCrop 守住「禁止裁切」开关确实进了 JSX。
+//
+// 模板里的 NOCROP 分支会把 T>1 压回 s0（完整放下），若不传或传错字面量，
+// 开关就成摆设——宽扁图案仍会被横向裁掉。
+func TestRenderJSXHonoursNoCrop(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		got := strings.ReplaceAll(jsxRender, "__NOCROP__", fmt.Sprintf("%t", want))
+		if strings.Contains(got, "__NOCROP__") {
+			t.Fatalf("NoCrop=%v：JSX 里仍残留 __NOCROP__ 占位符", want)
+		}
+		if !strings.Contains(got, fmt.Sprintf("var NOCROP = %t;", want)) {
+			t.Errorf("NoCrop=%v：JSX 未正确写入 NOCROP 字面量", want)
 		}
 	}
 }

@@ -44,6 +44,7 @@ const CONFIG = {
   cell_size: 800,
   jpg_quality: 95,
   trim_alpha: true,
+  no_crop: true,
   offset_x: 0,
   offset_y: 0,
   max_rounds: 2,
@@ -85,8 +86,16 @@ const SAMPLE_TASKS = [
 ]
 
 const GEN_TASKS = [
-  { id: 1, refPath: OUTDIR + '\\подсолнух 2@WMTAI8395_紫色IMD模版1_01.jpg', refName: '…_01.jpg', mode: 'handheld', count: 2, phase: 'done', progress: 100, message: '生成 2 张', files: [fileUrl('E:\\套图输出\\_mock\\gen1.jpg')], error: '', consistent: true, elapsedMs: 41200 },
-  { id: 2, refPath: OUTDIR + '\\подсолнух 2@WMTAI8395_紫色IMD模版1_02.jpg', refName: '…_02.jpg', mode: 'background', count: 2, phase: 'gen', progress: 50, message: '生成第 1/2 张', files: [], error: '', consistent: false, elapsedMs: 0 },
+  {
+    id: 1, refPath: OUTDIR + '\\подсолнух 2@WMTAI8395_紫色IMD模版1_01.jpg', refName: '…_01.jpg',
+    mode: 'handheld', count: 2, phase: 'done', progress: 100, message: '生成 2 张',
+    files: [
+      { path: REAL_JPG[2], mode: 'handheld', index: 1, same: true, diff: '', reason: '' },
+      { path: REAL_JPG[3], mode: 'handheld', index: 2, same: false, diff: '壳面图案位置偏移约 6px', reason: '图案位置偏移' },
+    ],
+    error: '', consistent: false, elapsedMs: 41200,
+  },
+  { id: 2, refPath: OUTDIR + '\\подсолнух 2@WMTAI8395_紫色IMD模版1_02.jpg', refName: '…_02.jpg', mode: 'background', count: 2, phase: 'generate', progress: 50, message: '生成第 1/2 张', files: [], error: '', consistent: false, elapsedMs: 0 },
 ]
 
 let genTasks: any[] = GEN_TASKS
@@ -107,7 +116,7 @@ function buildGenTasks(opt: any) {
   return out
 }
 let genTimer: any = null
-const GEN_PHASES = ['pending', 'gen', 'verify', 'done']
+const GEN_PHASES = ['pending', 'prompt', 'generate', 'check', 'done']
 function playGen() {
   if (genTimer) return
   genTimer = setInterval(() => {
@@ -183,15 +192,15 @@ const handlers: Record<string, (...a: any[]) => any> = {
   SaveConfig: (c: any) => { Object.assign(CONFIG, c); return structuredClone(CONFIG) },
   OpenConfigFile: () => null,
   CheckPhotoshop: () => ({ available: true, version: '27.7.0', error: '', checked: true }),
-  AppVersion: () => '0.2.0',
+  AppVersion: () => '0.3.1',
   PSCaps: () => ({
     version: '27.7.0', major: 27, verified: true,
     doJavaScript: true, noDialogs: true, editSmartObject: true, replaceContents: false,
     summary: 'Photoshop 27.x（已验证） · DoJavaScript 是 · 关闭模态框 是 · 编辑智能对象 是 · 替换智能对象 否',
     notes: ['Photoshop 27.x 为已实测版本，全部核心能力可用。', '不启用 placedLayerReplaceContents：它会破坏模板原有的透视变换。'],
   }),
-  CheckUpdate: () => ({ checked: true, hasNew: true, current: '0.2.0', latest: 'v0.3.0', notes: '## v0.3.0\n- 多轮自动微调\n- 视觉预检\n- 生图接入', url: 'https://github.com/z2476720314-sys/titao-workbench/releases', asset: 'https://example.com/titao.exe', size: 12000000, error: '' }),
-  InstallUpdate: () => '已下载 v0.3.0，替换脚本已就绪。关闭程序后会自动替换。',
+  CheckUpdate: () => ({ checked: true, hasNew: true, current: '0.3.1', latest: 'v0.3.2', notes: '## v0.3.2\n- 下一版演示用', url: 'https://github.com/z2476720314-sys/titao-workbench/releases', asset: 'https://example.com/titao.exe', size: 12000000, error: '' }),
+  InstallUpdate: () => '已下载 v0.3.1，替换脚本已就绪。关闭程序后会自动替换。',
 
   PickPatterns: () => [PATTERN, PATTERN2],
   PickPatternDir: () => 'E:\\插画',
@@ -242,7 +251,9 @@ const handlers: Record<string, (...a: any[]) => any> = {
   ListOutputs: () => ([
     { name: 'подсолнух 2@WMTAI8395', dir: OUTDIR, count: REAL_JPG.length, files: REAL_JPG },
   ]),
-  ListGenerated: () => ([]),
+  ListGenerated: () => ([
+    { name: 'подсолнух 2@WMTAI8395', dir: OUTDIR + '\\生成图', count: 3, files: [REAL_JPG[2], REAL_JPG[4], REAL_JPG[5]] },
+  ]),
 
   StartGen: (opt: any) => {
     genTasks = buildGenTasks(opt)

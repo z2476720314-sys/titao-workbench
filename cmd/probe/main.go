@@ -63,6 +63,7 @@ func main() {
 		Scales:     c.Candidates,
 		Auto:       true,
 		TrimAlpha:  c.TrimAlpha,
+		NoCrop:     c.NoCropOn(),
 		CellSize:   c.CellSize,
 		JPGQuality: c.JPGQuality,
 	}

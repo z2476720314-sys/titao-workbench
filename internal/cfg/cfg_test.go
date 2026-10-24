@@ -115,3 +115,39 @@ func TestNormalizeRepairsBrokenFile(t *testing.T) {
 		t.Error("output_dir 未补默认值")
 	}
 }
+
+// TestNoCropDefaultsOnForLegacyConfig 守住「老配置升级后不裁切保护不丢」。
+//
+// no_crop 是 v0.3.1 新增字段。若用裸 bool，旧 config.json 没有这个键时
+// 反序列化得到零值 false —— 用户什么都没做，「图案必须完整可见」就被静默关掉了。
+// 用指针 + normalize 补默认才能区分「没配置」与「明确关掉」。
+func TestNoCropDefaultsOnForLegacyConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	// 模拟 v0.3.0 的配置：有 trim_alpha，但没有 no_crop
+	legacy := `{"output_dir":"E:\\套图输出","fit":"auto","trim_alpha":true,"cell_size":800}`
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if !st.Get().NoCropOn() {
+		t.Error("旧配置缺少 no_crop 时应默认开启禁止裁切，实际为关闭")
+	}
+
+	// 用户明确关掉时必须保留
+	off := `{"no_crop":false}`
+	if err := os.WriteFile(path, []byte(off), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st2, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if st2.Get().NoCropOn() {
+		t.Error("配置里明确写了 no_crop:false，不应被 normalize 改回开启")
+	}
+}

@@ -37,13 +37,18 @@ type Config struct {
 	OutputDir   string `json:"output_dir"`
 
 	// 套图默认参数
-	Group      string  `json:"group"`
-	Fit        string  `json:"fit"`
-	CellSize   int     `json:"cell_size"`
-	JPGQuality int     `json:"jpg_quality"`
-	TrimAlpha  bool    `json:"trim_alpha"`
-	OffsetX    float64 `json:"offset_x"`
-	OffsetY    float64 `json:"offset_y"`
+	Group      string `json:"group"`
+	Fit        string `json:"fit"`
+	CellSize   int    `json:"cell_size"`
+	JPGQuality int    `json:"jpg_quality"`
+	TrimAlpha  bool   `json:"trim_alpha"`
+	// NoCrop 禁止裁切：图案整体必须完整可见。
+	// 用指针是为了区分「旧配置里根本没这个键」（nil → 取默认 true）
+	// 和「用户明确关掉」（&false）。若用裸 bool，老配置升级后会被零值
+	// 静默改成关闭，用户看不到任何提示就丢了这层保护。
+	NoCrop  *bool   `json:"no_crop"` // 禁止裁切：图案整体必须完整可见（默认开）
+	OffsetX float64 `json:"offset_x"`
+	OffsetY float64 `json:"offset_y"`
 
 	// 参数自动微调：多轮迭代收敛（模型自行决定候选区间与微调量）
 	MaxRounds  int  `json:"max_rounds"`   // 最大迭代轮数，1~3，默认 2
@@ -89,6 +94,7 @@ func Default() Config {
 		CellSize:     800,
 		JPGQuality:   95,
 		TrimAlpha:    true,
+		NoCrop:       boolPtr(true),
 
 		MaxRounds:  2,
 		AutoTuneOn: true,
@@ -233,6 +239,11 @@ func normalize(c *Config) {
 		c.Fit = "auto"
 	}
 
+	// 禁止裁切默认开：旧配置没有这个键时反序列化得到 nil，这里补成 true
+	if c.NoCrop == nil {
+		c.NoCrop = boolPtr(true)
+	}
+
 	// 多轮迭代：1~3 轮，超范围收回，0 视为未配置用默认 2
 	if c.MaxRounds <= 0 {
 		c.MaxRounds = 2
@@ -260,4 +271,13 @@ func normalize(c *Config) {
 	if c.GenCount > 10 {
 		c.GenCount = 10
 	}
+}
+
+// boolPtr 返回 v 的指针。配置里的可选布尔值用指针表达，
+// 才能区分「没配置」与「明确关掉」。
+func boolPtr(v bool) *bool { return &v }
+
+// NoCropOn 报告禁止裁切是否开启。未配置视为开启。
+func (c Config) NoCropOn() bool {
+	return c.NoCrop == nil || *c.NoCrop
 }

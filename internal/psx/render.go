@@ -9,10 +9,11 @@ import (
 // 摆放方式：决定「基准缩放」怎么算。
 //
 // 实测结论（标尺实验）：模板的智能对象变换已经把 945x1890 的画布映射到壳面，
-// 所以按画布 1:1 置入（FitAuto）在每一格都正好铺满壳面，包括横向倾斜的手持格。
-// 早期用 contain=min(cw/pw, ch/ph) 当基准会让宽扁图案算得过大、左右被裁。
+// 满格图案按画布 1:1 置入正好铺满。但画布 1:1 只对满格图案成立：
+// 宽扁图案（如 945x574）在 1:1 时宽度已顶满壳面，再放大就横向裁掉设计元素。
+// 因此 auto 统一采用 contain 语义（= 完整放下），保证图案整体可见。
 const (
-	FitAuto    = "auto"    // 画布 1:1 基准（默认，推荐）
+	FitAuto    = "auto"    // 完整放下为基准（默认，推荐；等价 contain）
 	FitContain = "contain" // 以「完整放下」为基准
 	FitCover   = "cover"   // 以「刚好铺满」为基准
 	FitStretch = "stretch" // 拉伸变形
@@ -36,6 +37,9 @@ type RenderRequest struct {
 	OffsetY float64
 	// OutDir 是拼合图输出目录，脚本会写入 flat_0.png…flat_N.png。
 	OutDir string
+	// NoCrop 为 true 时把缩放硬性限制在「完整放下」以内（T 超过 1 会被压回 1），
+	// 保证图案任何可见部分都不会被壳边裁掉。cover / stretch 不受影响。
+	NoCrop bool
 	// PSVersion 是 Photoshop 版本号，用于版本自适应能力校验。
 	//
 	// 留空时由 Render 从当前会话实时读取（每次渲染多一次 COM 属性读取），
@@ -282,16 +286,26 @@ const jsxRender = `(function(){
               var pw = b[2].as("px") - b[0].as("px");
               var ph = b[3].as("px") - b[1].as("px");
 
-              // 基准缩放：模板 SO 变换已把画布映射到壳面，故 auto 下 1:1 即「刚好铺满」。
+              // 基准缩放：
+              //   auto / contain = 「完整放下」s0（图案整体可见，至少一个方向顶到壳边）
+              //   cover          = 「刚好铺满」s1（另一方向必然被裁）
+              //
+              // 曾经把 auto 定成「画布 1:1」，对满格图案等价，但对宽扁/窄长图案
+              // 会让 1:1 就已经溢出壳面（例如 945x574 的图案 T=1 时宽度已顶满，
+              // 再放大就横向裁掉设计元素）。改成 s0 后 auto 天然不裁切。
               var FIT = "__FIT__";
+              var NOCROP = __NOCROP__;
               var s0 = Math.min(cw / pw, ch / ph);
               var s1 = Math.max(cw / pw, ch / ph);
               var sx, sy;
               if (FIT == "stretch")      { sx = cw / pw * T; sy = ch / ph * T; }
               else if (FIT == "none")    { sx = sy = T; }
-              else if (FIT == "contain") { sx = sy = s0 * T; }
               else if (FIT == "cover")   { sx = sy = s1 * T; }
-              else                       { sx = sy = T; }
+              else                       { sx = sy = s0 * T; }   // auto / contain
+              // 不裁切上限：T 超过 1 就必然有方向被壳边裁掉。
+              if (NOCROP && FIT != "stretch" && FIT != "cover" && T > 1) {
+                sx = sy = s0;
+              }
               nl.resize(sx * 100, sy * 100, AnchorPosition.MIDDLECENTER);
 
               var b2 = nl.bounds;
@@ -362,6 +376,7 @@ func (s *Session) Render(req RenderRequest) (string, error) {
 	jsx = strings.ReplaceAll(jsx, "__OFX__", fmt.Sprintf("%g", req.OffsetX))
 	jsx = strings.ReplaceAll(jsx, "__OFY__", fmt.Sprintf("%g", req.OffsetY))
 	jsx = strings.ReplaceAll(jsx, "__OUTDIR__", escapePath(req.OutDir))
+	jsx = strings.ReplaceAll(jsx, "__NOCROP__", fmt.Sprintf("%t", req.NoCrop))
 
 	var log string
 	err = s.Do(func(c *Conn) error {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,6 +58,8 @@ type Options struct {
 	CellSize    int       `json:"cellSize"`
 	JPGQuality  int       `json:"jpgQuality"`
 	PatternName string    `json:"patternName"` // 仅单图案时覆盖名称
+	MaxRounds   int       `json:"maxRounds"`   // 评审微调最多几轮，0 则用配置里的 max_rounds
+	NoCrop      bool      `json:"noCrop"`      // 禁止裁切：放大上限压到「完整放下」
 }
 
 // Task 是一个「图案 × 模板」组合。
@@ -956,12 +959,31 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		ImageMaxSide: def.ImageMaxSide,
 		Thinking:     def.Thinking,
 	}
+	// 轮数优先级：请求里显式给的 maxRounds > 配置里的 max_rounds。
+	// 只有「调模型」才谈得上微调，所以 Auto 关闭时恒为 1 轮。
+	wantRounds := opt.MaxRounds
+	if wantRounds <= 0 {
+		wantRounds = def.MaxRounds
+	}
 	rounds := 1
-	if opt.Auto && def.AutoTuneOn && def.MaxRounds > 1 {
-		rounds = def.MaxRounds
+	if opt.Auto && def.AutoTuneOn && wantRounds > 1 {
+		rounds = wantRounds
+		if rounds > 3 {
+			rounds = 3
+		}
 	}
 
 	scales := opt.Scales
+
+	// 禁止裁切：auto/contain 语义下 1.0 就是「完整放下」的极限，
+	// 任何 >1 的档位都会把图案推出壳面被裁掉。宽扁图案（如 945x574）
+	// 尤其明显——1:1 时宽度已顶满，放大就横向丢掉设计元素。
+	if opt.NoCrop && fitIsContainLike(opt.Fit) {
+		if kept := squashScales(scales); len(kept) != len(scales) {
+			e.logf("dim", "  禁止裁切：候选档位等比压入 (0,1] → %v", kept)
+			scales = kept
+		}
+	}
 	offX, offY := opt.OffsetX, opt.OffsetY
 	var (
 		flatPick    string        // 最终选中的拼合图
@@ -998,6 +1020,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			OffsetY:      offY,
 			OutDir:       tmp,
 			PSVersion:    def.PSVersion,
+			NoCrop:       opt.NoCrop,
 		}
 		log, err := e.ps.Render(req)
 		for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
@@ -1110,6 +1133,13 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		e.logf("info", "  第 %d 轮评审 %d 分：%s → %s x%.2f 偏移(%+.2f,%+.2f)",
 			round, adv.Score, adv.Problem, adv.Direction, nextScale, nx, ny)
 
+		// 禁止裁切时，微调不能把图案放大到超出壳面。
+		// 只压回上限、不放弃这一轮：模型可能同时给了位移建议，位移仍要生效。
+		if opt.NoCrop && fitIsContainLike(opt.Fit) && nextScale > 1 {
+			e.logf("info", "  禁止裁切：x%.2f 超出完整放下上限，压回 x1.00", nextScale)
+			nextScale = 1
+		}
+
 		// 下一轮只渲这一档，省 PS 与模型额度
 		scales = []float64{nextScale}
 		offX, offY = nx, ny
@@ -1197,3 +1227,38 @@ func (e *Engine) updateTask(t *Task, fn func(*Task)) {
 }
 
 func copyFile(src, dst string) error { return fileutil.Copy(src, dst) }
+
+// fitIsContainLike 判断该摆放方式是否以「完整放下」为基准。
+// auto 与 contain 同义；留空按 auto 处理。cover / stretch / none 不受禁止裁切约束。
+func fitIsContainLike(fit string) bool {
+	return fit == "" || fit == psx.FitAuto || fit == psx.FitContain
+}
+
+// squashScales 在「禁止裁切」时把候选档位等比压进 (0,1]。
+//
+// 不能简单把 >1 的档位截断成 1：那样 [0.85 0.95 1.05 1.15 1.3] 会退化成
+// [0.85 0.95 1.00] 三档且全挤在一侧，模型只能做相对比较、选出的档位随区间漂移。
+// 等比缩放保留档位之间的相对间距，仍是完整的「明显偏小 → 刚好铺满」区间。
+//
+// 若最大档本就 <=1（说明调用方已经给好区间），原样返回。
+func squashScales(scales []float64) []float64 {
+	maxS := 0.0
+	for _, s := range scales {
+		if s > maxS {
+			maxS = s
+		}
+	}
+	if maxS <= 1 || len(scales) == 0 {
+		return scales
+	}
+	k := 1 / maxS
+	out := make([]float64, 0, len(scales))
+	for _, s := range scales {
+		// 保留三位小数，避免 0.8500000001 这类浮点噪声影响去重与显示
+		v := math.Round(s*k*1000) / 1000
+		if v > 0 {
+			out = append(out, v)
+		}
+	}
+	return out
+}

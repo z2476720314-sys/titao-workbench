@@ -44,6 +44,9 @@
   let jpgQuality = 95
   let cellSize = 800
   let patternName = ''
+  let maxRounds = 2
+  let noCrop = true
+  let advOpen = false
 
   // 任务
   let tasks: any[] = []
@@ -292,6 +295,7 @@
     checkUpdate()
     loadCaps()
     if (view === 'outputs') loadOutputs()
+    if (view === 'gen') loadGenerated()
     const off = EventsOn('titao:event', (ev: any) => onEvent(ev))
     const offGen = EventsOn('titao:gen', (ev: any) => onGenEvent(ev))
     return () => {
@@ -309,6 +313,7 @@
       group = conf.group || '插画'
       fit = conf.fit || 'auto'
       trimAlpha = conf.trim_alpha !== false
+      noCrop = conf.no_crop !== false
       jpgQuality = conf.jpg_quality || 95
       cellSize = conf.cell_size || 800
       offsetX = conf.offset_x || 0
@@ -490,7 +495,11 @@
     return list.filter((_, k) => k !== i)
   }
 
-  function baseName(p: string) {
+  // baseName 会拿到后端返回的任意字段，缺字段时不能把整页渲染打断，
+  // 因此这里对非字符串一律返回空串（真实数据里 GenFile.path 一定存在，
+  // 但字段改名或旧缓存会让它变成 undefined）。
+  function baseName(p: unknown) {
+    if (typeof p !== 'string' || !p) return ''
     const parts = p.split(/[\\/]/)
     return parts[parts.length - 1] || p
   }
@@ -542,6 +551,8 @@
       cellSize: Number(cellSize) || 800,
       jpgQuality: Number(jpgQuality) || 95,
       patternName,
+      maxRounds: Number(maxRounds) || 0,
+      noCrop,
     }
 
     logs = []
@@ -675,6 +686,7 @@
       conf.group = group
       conf.fit = fit
       conf.trim_alpha = trimAlpha
+      conf.no_crop = noCrop
       conf.jpg_quality = Number(jpgQuality) || 95
       conf.cell_size = Number(cellSize) || 800
       conf.offset_x = Number(offsetX) || 0
@@ -689,8 +701,8 @@
   }
 
   const FIT_OPTS = [
-    { v: 'auto', label: 'auto · 画布 1:1（推荐）', hint: '实测每格刚好铺满壳面' },
-    { v: 'contain', label: 'contain · 完整放下', hint: '以不裁切为基准' },
+    { v: 'auto', label: 'auto · 完整放下（推荐）', hint: '图案整体可见，配合「不裁切」自动收敛' },
+    { v: 'contain', label: 'contain · 完整放下', hint: '同 auto，显式指定' },
     { v: 'cover', label: 'cover · 铺满', hint: '以铺满为基准' },
     { v: 'stretch', label: 'stretch · 拉伸变形', hint: '不保持宽高比' },
     { v: 'none', label: 'none · 原始像素', hint: '不做任何缩放' },
@@ -731,7 +743,7 @@
 
     <nav class="nav">
       {#each NAV as n}
-        <button class="nav-item" class:active={view === n.id} on:click={() => { view = n.id; if (n.id === 'outputs') loadOutputs() }}>
+        <button class="nav-item" class:active={view === n.id} on:click={() => { view = n.id; if (n.id === 'outputs') loadOutputs(); if (n.id === 'gen') loadGenerated() }}>
           <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
             <path d={n.icon} />
           </svg>
@@ -896,84 +908,112 @@
         {/if}
       </section>
 
-      <!-- 参数 -->
+      <!-- 摆放：只留一个总开关，细参数收进「高级」 -->
       <section class="card">
         <div class="card-head">
-          <div class="card-title">摆放参数</div>
-        </div>
-
-        <div class="grid-2">
-          <div class="field">
-            <span class="lbl">图层组</span>
-            <input type="text" bind:value={group} placeholder="插画" />
-          </div>
-          <div class="field">
-            <span class="lbl">摆放方式</span>
-            <select bind:value={fit}>
-              {#each FIT_OPTS as o}
-                <option value={o.v}>{o.label}</option>
-              {/each}
-            </select>
-            <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-              {FIT_OPTS.find((o) => o.v === fit)?.hint || ''}
-            </div>
-          </div>
-        </div>
-
-        <div class="field">
-          <label class="check-row">
-            <input type="checkbox" bind:checked={auto} />
-            <span style="color:var(--text);font-size:12px">视觉模型自动判断图案大小</span>
-          </label>
-          <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-            按饱满度/遮挡/重心打分，从候选倍数里挑一张。关掉则用固定档位。
+          <div class="card-title">摆放</div>
+          <div class="row">
+            <button class="ghost" on:click={() => (advOpen = !advOpen)}>
+              {advOpen ? '收起高级' : '高级参数'}
+            </button>
           </div>
         </div>
 
         <div class="grid-2">
-          <div class="field">
-            <span class="lbl">手动档位（留空=用模型或配置里的候选）</span>
-            <input type="text" bind:value={manualScale} placeholder="例如 0.95,1.05,1.15" />
-            <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-              1.0 = 刚好铺满壳面，&lt;1 留白，&gt;1 超出被裁切。填了就不调模型。
+          <div class="field" style="margin-bottom:0">
+            <label class="check-row">
+              <input type="checkbox" bind:checked={auto} />
+              <span style="color:var(--text);font-size:12px">视觉模型自动判断图案大小</span>
+            </label>
+            <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
+              渲染候选档 → 模型挑最合适的一张 → 再按评审建议微调 {maxRounds} 轮。关掉则用固定档位。
             </div>
           </div>
-          <div class="field">
+          <div class="field" style="margin-bottom:0">
             <span class="lbl">图案名（仅单图案时覆盖）</span>
             <input type="text" bind:value={patternName} placeholder="留空则用文件名" />
           </div>
         </div>
 
-        <div class="grid-4">
-          <div class="field">
-            <span class="lbl">水平微调</span>
-            <input type="number" step="0.01" bind:value={offsetX} />
-            <div style="font-size:10px;color:var(--muted)">0.1 = 右移 10%</div>
-          </div>
-          <div class="field">
-            <span class="lbl">垂直微调</span>
-            <input type="number" step="0.01" bind:value={offsetY} />
-            <div style="font-size:10px;color:var(--muted)">-0.1 = 上移 10%</div>
-          </div>
-          <div class="field">
-            <span class="lbl">格边长</span>
-            <input type="number" bind:value={cellSize} />
-          </div>
-          <div class="field">
-            <span class="lbl">JPG 质量</span>
-            <input type="number" min="1" max="100" bind:value={jpgQuality} />
-          </div>
-        </div>
+        {#if advOpen}
+          <div class="adv">
+            <div class="grid-2">
+              <div class="field">
+                <span class="lbl">图层组</span>
+                <input type="text" bind:value={group} placeholder="插画" />
+              </div>
+              <div class="field">
+                <span class="lbl">摆放方式</span>
+                <select bind:value={fit}>
+                  {#each FIT_OPTS as o}
+                    <option value={o.v}>{o.label}</option>
+                  {/each}
+                </select>
+                <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
+                  {FIT_OPTS.find((o) => o.v === fit)?.hint || ''}
+                </div>
+              </div>
+            </div>
 
-        <div class="field" style="margin-bottom:0">
-          <label class="check-row">
-            <input type="checkbox" bind:checked={trimAlpha} />
-            <span style="color:var(--text);font-size:12px">裁掉图案四周透明留白</span>
-          </label>
-          <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-            开启后图案真正居中且尺寸准确；关闭则保留原始画布位置。
+            <div class="grid-2">
+              <div class="field">
+                <span class="lbl">手动档位（留空=用模型或配置里的候选）</span>
+                <input type="text" bind:value={manualScale} placeholder="例如 0.95,1.05,1.15" />
+                <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
+                  1.0 = 图案完整放下（不裁切上限），&lt;1 留白，&gt;1 会超出壳面被裁。填了就不调模型。
+                </div>
+              </div>
+              <div class="field">
+                <span class="lbl">最大迭代轮数</span>
+                <input type="number" min="1" max="3" bind:value={maxRounds} />
+                <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
+                  1 = 只选档不微调；2~3 = 按评审建议再调几轮。轮数越多越慢。
+                </div>
+              </div>
+            </div>
+
+            <div class="grid-4">
+              <div class="field">
+                <span class="lbl">水平微调</span>
+                <input type="number" step="0.01" bind:value={offsetX} />
+                <div style="font-size:10px;color:var(--muted)">0.1 = 右移 10%</div>
+              </div>
+              <div class="field">
+                <span class="lbl">垂直微调</span>
+                <input type="number" step="0.01" bind:value={offsetY} />
+                <div style="font-size:10px;color:var(--muted)">-0.1 = 上移 10%</div>
+              </div>
+              <div class="field">
+                <span class="lbl">格边长</span>
+                <input type="number" bind:value={cellSize} />
+              </div>
+              <div class="field">
+                <span class="lbl">JPG 质量</span>
+                <input type="number" min="1" max="100" bind:value={jpgQuality} />
+              </div>
+            </div>
+
+            <div class="field" style="margin-bottom:0">
+              <label class="check-row">
+                <input type="checkbox" bind:checked={noCrop} />
+                <span style="color:var(--text);font-size:12px">图案必须完整可见（不裁切）</span>
+              </label>
+              <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
+                开启后图案整体不会被壳边裁掉，放大上限自动压到「完整放下」；宽扁、窄长图案强烈建议保持开启。
+              </div>
+            </div>
+
+            <div class="field" style="margin-bottom:0">
+              <label class="check-row">
+                <input type="checkbox" bind:checked={trimAlpha} />
+                <span style="color:var(--text);font-size:12px">裁掉图案四周透明留白</span>
+              </label>
+              <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
+                开启后图案真正居中且尺寸准确；关闭则保留原始画布位置。
+              </div>
+            </div>
           </div>
-        </div>
+        {/if}
       </section>
 
       <!-- 输出 -->
@@ -1209,7 +1249,7 @@
           </div>
           <div class="field">
             <span class="lbl">输出目录</span>
-            <input type="text" value={outputDir} readonly />
+            <input type="text" bind:value={outputDir} readonly />
             <div style="font-size:10.5px;color:var(--muted)">
               结构：<code style="font-family:var(--mono)">&lt;输出目录&gt;/&lt;图案名&gt;/生成图/&lt;图案名&gt;_&lt;模式&gt;_genNN.jpg</code>
             </div>
@@ -1630,11 +1670,22 @@
               <input type="number" step="0.01" bind:value={conf.offset_y} />
             </div>
           </div>
-          <div class="field" style="margin-bottom:0">
-            <label class="check-row">
-              <input type="checkbox" bind:checked={conf.trim_alpha} />
-              <span style="color:var(--text);font-size:12px">默认裁掉图案透明留白</span>
-            </label>
+          <div class="grid-2" style="margin-top:var(--sp-md)">
+            <div class="field" style="margin-bottom:0">
+              <label class="check-row">
+                <input type="checkbox" bind:checked={conf.trim_alpha} />
+                <span style="color:var(--text);font-size:12px">默认裁掉图案透明留白</span>
+              </label>
+            </div>
+            <div class="field" style="margin-bottom:0">
+              <label class="check-row">
+                <input type="checkbox" bind:checked={conf.no_crop} />
+                <span style="color:var(--text);font-size:12px">默认禁止裁切</span>
+              </label>
+            </div>
+          </div>
+          <div style="font-size:10.5px;color:var(--muted);margin-top:6px;line-height:1.7">
+            禁止裁切开启后，图案整体必须完整可见，放大上限自动压到「完整放下」；宽扁、窄长图案建议保持开启。
           </div>
         </section>
 
@@ -1704,7 +1755,7 @@
           </div>
         </section>
 
-        <div class="actionbar">
+        <div class="actionbar static">
           <button class="primary" on:click={saveConf} disabled={savingConf}>
             {savingConf ? '保存中…' : confSaved || '保存设置'}
           </button>
@@ -1739,13 +1790,13 @@
         <table>
           <thead><tr><th style="width:100px">t</th><th>效果</th></tr></thead>
           <tbody>
-            <tr><td class="mono">1.0</td><td>图案刚好铺满壳面（至少一个方向顶到壳边）</td></tr>
+            <tr><td class="mono">1.0</td><td>图案完整放下，至少一个方向顶到壳边（不裁切上限）</td></tr>
             <tr><td class="mono">&lt; 1.0</td><td>留白，图案变小</td></tr>
             <tr><td class="mono">&gt; 1.0</td><td>超出壳面，被裁切</td></tr>
           </tbody>
         </table>
         <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.7">
-          模板的智能对象变换已经把图案画布映射到壳面，所以按画布 1:1 置入在每一格都正好铺满，
+          模板的智能对象变换已经把图案画布映射到壳面，所以按「完整放下」置入在每一格都能贴合壳面，
           包括横向倾斜的手持格。这也是 <b>auto</b> 成为推荐值的原因。
         </div>
       </section>

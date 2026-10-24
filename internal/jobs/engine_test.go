@@ -13,6 +13,7 @@ import (
 
 	"titao/internal/cfg"
 	"titao/internal/judge"
+	"titao/internal/psx"
 )
 
 // ---------- 测试脚手架 ----------
@@ -848,6 +849,64 @@ func TestQueueJSONShape(t *testing.T) {
 	for _, k := range []string{"id", "pattern", "template", "pattern_name", "template_name", "phase"} {
 		if _, ok := first[k]; !ok {
 			t.Fatalf("queue task 缺少字段 %q", k)
+		}
+	}
+}
+
+// TestSquashScalesKeepsSpacing 守住「禁止裁切」不会把候选档位挤成一堆。
+//
+// 曾经的写法是把 >1 的档位直接截断成 1，[0.85 0.95 1.05 1.15 1.3] 会变成
+// [0.85 0.95 1.00]——只剩三档且全在左半边，视觉模型只能做相对比较，
+// 选出的档位随区间漂移（已实测）。等比缩放后仍是 5 档、间距保留。
+func TestSquashScalesKeepsSpacing(t *testing.T) {
+	in := []float64{0.85, 0.95, 1.05, 1.15, 1.3}
+	got := squashScales(in)
+
+	if len(got) != len(in) {
+		t.Fatalf("档位数量 = %d，期望 %d（不能因为压入 (0,1] 就丢档）", len(got), len(in))
+	}
+	if got[len(got)-1] != 1 {
+		t.Errorf("最大档 = %v，期望 1（刚好铺满）", got[len(got)-1])
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] <= got[i-1] {
+			t.Errorf("档位未严格递增：%v", got)
+			break
+		}
+	}
+	// 相对间距应保持：0.85/1.3 = 0.6538...
+	wantFirst := 0.85 / 1.3
+	if d := got[0] - wantFirst; d > 0.002 || d < -0.002 {
+		t.Errorf("首档 = %v，期望约 %.4f（等比缩放应保留相对间距）", got[0], wantFirst)
+	}
+}
+
+// TestSquashScalesLeavesGoodRange 已经 <=1 的区间必须原样返回，不能动。
+func TestSquashScalesLeavesGoodRange(t *testing.T) {
+	in := []float64{0.6, 0.75, 0.9}
+	got := squashScales(in)
+	if len(got) != len(in) {
+		t.Fatalf("档位数量被改动：%v", got)
+	}
+	for i := range in {
+		if got[i] != in[i] {
+			t.Errorf("第 %d 档 = %v，期望 %v（不该改动已合规的区间）", i, got[i], in[i])
+		}
+	}
+}
+
+// TestFitIsContainLike 守住「禁止裁切」只作用于 contain 语义的摆放方式。
+func TestFitIsContainLike(t *testing.T) {
+	yes := []string{"", psx.FitAuto, psx.FitContain}
+	for _, f := range yes {
+		if !fitIsContainLike(f) {
+			t.Errorf("fitIsContainLike(%q) = false，期望 true", f)
+		}
+	}
+	no := []string{psx.FitCover, psx.FitStretch, psx.FitNone}
+	for _, f := range no {
+		if fitIsContainLike(f) {
+			t.Errorf("fitIsContainLike(%q) = true，期望 false（cover/stretch/none 本就允许裁切）", f)
 		}
 	}
 }
