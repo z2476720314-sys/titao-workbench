@@ -148,11 +148,30 @@ func (s *Store) load() error {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return fmt.Errorf("解析 %s: %w", s.path, err)
 	}
+	// 老配置缺 no_crop 时补上默认值后回写一次，让 config.json 自解释——
+	// 否则用户打开文件找不到这个键，既不知道有这层保护、也不知道怎么关。
+	//
+	// 注意不能用 c.NoCrop == nil 判断：上面先铺了 Default()，NoCrop 已经是
+	// 非 nil 的 true，永远判不出来。要看原始文件里到到底有没有这个键。
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return fmt.Errorf("解析 %s: %w", s.path, err)
+	}
+	_, hasNoCrop := keys["no_crop"]
+	needRewrite := !hasNoCrop
+
 	// 手工改坏的值（cell_size=0、fit 拼错）在这里就纠回来，别留到运行期
 	normalize(&c)
 	s.mu.Lock()
 	s.cur = c
+	var werr error
+	if needRewrite {
+		werr = s.saveLocked()
+	}
 	s.mu.Unlock()
+	if werr != nil {
+		return fmt.Errorf("回写默认配置: %w", werr)
+	}
 	return nil
 }
 

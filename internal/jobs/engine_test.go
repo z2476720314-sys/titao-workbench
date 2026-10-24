@@ -805,7 +805,9 @@ func TestEventCarriesState(t *testing.T) {
 	if err := e.begin(Options{}, store.Get(), makeTasks(2), 0, 0); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	waitFor(t, "跑完", func() bool { return e.State() == StateIdle })
+	// 等 done 事件而不是等 State()==StateIdle：run 的 defer 先把状态置 idle、
+	// 再 emit done，等状态会抢在 emit 之前返回，doneEvent() 拿到 nil 而误判失败。
+	waitFor(t, "跑完并发出 done 事件", func() bool { return rec.doneEvent() != nil })
 
 	var sawState bool
 	for _, ev := range rec.snapshot() {

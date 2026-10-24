@@ -1,6 +1,7 @@
 package cfg
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -149,5 +150,35 @@ func TestNoCropDefaultsOnForLegacyConfig(t *testing.T) {
 	}
 	if st2.Get().NoCropOn() {
 		t.Error("配置里明确写了 no_crop:false，不应被 normalize 改回开启")
+	}
+}
+
+// TestLegacyConfigGetsNoCropWrittenBack 确认老配置会被补上 no_crop 并回写。
+//
+// 只补内存值不回写的话，用户打开 config.json 找不到这个键，
+// 既不知道有「不裁切」这层保护，也不知道怎么关掉。
+func TestLegacyConfigGetsNoCropWrittenBack(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"fit":"auto","trim_alpha":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewStore(dir); err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("回写后的配置不是合法 JSON: %v", err)
+	}
+	if v, ok := got["no_crop"]; !ok {
+		t.Fatal("老配置回写后应出现 no_crop 键")
+	} else if v != true {
+		t.Errorf("回写的 no_crop 应为 true，实际 %v", v)
 	}
 }
