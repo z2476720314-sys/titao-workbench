@@ -521,6 +521,12 @@ func (e *Engine) begin(opt Options, def cfg.Config, tasks []*Task, done, failed 
 	if len(tasks) == 0 {
 		return fmt.Errorf("没有可执行的任务")
 	}
+	if strings.TrimSpace(opt.OutputDir) == "" {
+		opt.OutputDir = def.OutputDir
+	}
+	if strings.TrimSpace(opt.OutputDir) == "" {
+		return fmt.Errorf("请先选择输出目录")
+	}
 	if !e.tryLockIdle() {
 		return fmt.Errorf("已有任务在运行")
 	}
@@ -598,7 +604,7 @@ func (e *Engine) saveQueue(opt Options) {
 	}
 }
 
-func (e *Engine) run(ctx context.Context, opt Options, def cfg.Config, tasks []*Task) {
+func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, tasks []*Task) {
 	stopped := false
 
 	defer func() {
@@ -638,19 +644,19 @@ func (e *Engine) run(ctx context.Context, opt Options, def cfg.Config, tasks []*
 
 	// 参数兜底
 	if opt.Group == "" {
-		opt.Group = def.Group
+		opt.Group = settings.Group
 	}
 	if opt.Fit == "" {
-		opt.Fit = def.Fit
+		opt.Fit = settings.Fit
 	}
 	if opt.CellSize <= 0 {
-		opt.CellSize = def.CellSize
+		opt.CellSize = settings.CellSize
 	}
 	if opt.JPGQuality <= 0 {
-		opt.JPGQuality = def.JPGQuality
+		opt.JPGQuality = settings.JPGQuality
 	}
 	if len(opt.Scales) == 0 {
-		opt.Scales = def.Candidates
+		opt.Scales = settings.Candidates
 	}
 	if len(opt.Scales) == 0 {
 		// 配置被手工改坏（candidates 为空）时的最后兜底，避免下面 [:1] 越界 panic
@@ -662,22 +668,22 @@ func (e *Engine) run(ctx context.Context, opt Options, def cfg.Config, tasks []*
 	}
 	outRoot := opt.OutputDir
 	if outRoot == "" {
-		outRoot = def.OutputDir
+		outRoot = settings.OutputDir
 	}
 
 	jc := judge.Config{
-		BaseURL:      def.BaseURL,
-		APIKey:       def.APIKey,
-		Model:        def.Model,
-		MaxTokens:    def.MaxTokens,
-		Timeout:      time.Duration(def.TimeoutSec) * time.Second,
-		Temperature:  def.Temperature,
-		ImageMaxSide: def.ImageMaxSide,
-		Thinking:     def.Thinking,
+		BaseURL:      settings.BaseURL,
+		APIKey:       settings.APIKey,
+		Model:        settings.Model,
+		MaxTokens:    settings.MaxTokens,
+		Timeout:      time.Duration(settings.TimeoutSec) * time.Second,
+		Temperature:  settings.Temperature,
+		ImageMaxSide: settings.ImageMaxSide,
+		Thinking:     settings.Thinking,
 	}
 
 	e.logf("info", "开始：%d 个组合 / 输出到 %s / %s",
-		len(tasks), outRoot, autoLabel(opt.Auto, def.Model))
+		len(tasks), outRoot, autoLabel(opt.Auto, settings.Model))
 
 	// 清掉上次残留的 PS 文档，避免互相干扰
 	if err := e.closeDocs(); err != nil {
@@ -703,11 +709,11 @@ func (e *Engine) run(ctx context.Context, opt Options, def cfg.Config, tasks []*
 		e.saveQueue(opt)
 
 		// 预检：同一个图案只判一次（多模板时后续组直接复用记录库里的结论）
-		if skip := e.precheckOne(ctx, def, jc, t, i+1, len(tasks)); skip {
+		if skip := e.precheckOne(ctx, settings, jc, t, i+1, len(tasks)); skip {
 			e.saveQueue(opt)
 			continue
 		}
-		e.processFn(e, ctx, opt, def, jc, t, outRoot, i+1, len(tasks))
+		e.processFn(e, ctx, opt, settings, jc, t, outRoot, i+1, len(tasks))
 		// 组结束后落盘：强杀恢复时能准确知道这组已完成
 		e.saveQueue(opt)
 	}
@@ -949,16 +955,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	//    第一轮用候选档位让视觉模型挑，之后每轮按评审建议用单档重渲，
 	//    直到模型说「够了」、调不动、或到达 max_rounds 上限。
 	//    关闭自动判断或 auto_tune_on 时退化为原来的单轮行为。
-	tc := tuner.Config{
-		BaseURL:      def.BaseURL,
-		APIKey:       def.APIKey,
-		Model:        def.Model,
-		MaxTokens:    def.MaxTokens,
-		Timeout:      time.Duration(def.TimeoutSec) * time.Second,
-		Temperature:  def.Temperature,
-		ImageMaxSide: def.ImageMaxSide,
-		Thinking:     def.Thinking,
-	}
+	tc := tuner.Config(jc)
 	// 轮数优先级：请求里显式给的 maxRounds > 配置里的 max_rounds。
 	// 只有「调模型」才谈得上微调，所以 Auto 关闭时恒为 1 轮。
 	wantRounds := opt.MaxRounds

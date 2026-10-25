@@ -112,8 +112,8 @@ func TestNormalizeRepairsBrokenFile(t *testing.T) {
 	if c.Group == "" {
 		t.Error("group 未补默认值")
 	}
-	if c.OutputDir == "" {
-		t.Error("output_dir 未补默认值")
+	if c.OutputDir != "" {
+		t.Error("未选择输出目录时不应注入默认路径")
 	}
 }
 
@@ -126,7 +126,7 @@ func TestNoCropDefaultsOnForLegacyConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	// 模拟 v0.3.0 的配置：有 trim_alpha，但没有 no_crop
-	legacy := `{"output_dir":"E:\\套图输出","fit":"auto","trim_alpha":true,"cell_size":800}`
+	legacy := `{"output_dir":"output","fit":"auto","trim_alpha":true,"cell_size":800}`
 	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
 	}

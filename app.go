@@ -366,6 +366,9 @@ func (a *App) OpenOutputDir() error {
 		return fmt.Errorf("配置未加载")
 	}
 	dir := a.store.Get().OutputDir
+	if strings.TrimSpace(dir) == "" {
+		return fmt.Errorf("请先选择输出目录")
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -409,6 +412,9 @@ func (a *App) ListOutputs() ([]OutputGroup, error) {
 		return nil, fmt.Errorf("配置未加载")
 	}
 	root := a.store.Get().OutputDir
+	if strings.TrimSpace(root) == "" {
+		return []OutputGroup{}, nil
+	}
 	dirs, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {

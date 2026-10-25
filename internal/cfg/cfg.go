@@ -86,9 +86,6 @@ func Default() Config {
 		ImageMaxSide: 640,
 		Thinking:     false,
 		Candidates:   DefaultCandidates(),
-		TemplateDir:  `E:\套图模板`,
-		PatternDir:   `E:\插画`,
-		OutputDir:    `E:\套图输出`,
 		Group:        "插画",
 		Fit:          "auto",
 		CellSize:     800,
@@ -245,9 +242,6 @@ func normalize(c *Config) {
 	// 单档时模型无从比较，自动判断会直接跳过；给回默认区间
 	if len(c.Candidates) == 1 {
 		c.Candidates = DefaultCandidates()
-	}
-	if c.OutputDir == "" {
-		c.OutputDir = `E:\套图输出`
 	}
 	if c.Group == "" {
 		c.Group = "插画"

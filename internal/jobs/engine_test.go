@@ -29,6 +29,9 @@ func newTestEngine(t *testing.T) (*Engine, *cfg.Store, *recorder) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
+	if _, err := store.Update(func(c *cfg.Config) { c.OutputDir = filepath.Join(dir, "output") }); err != nil {
+		t.Fatal(err)
+	}
 	rec := &recorder{}
 	e := New(nil, store, func(ev Event) { rec.add(ev) })
 	return e, store, rec

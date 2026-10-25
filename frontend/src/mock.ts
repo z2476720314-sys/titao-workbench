@@ -7,38 +7,42 @@ import { mount } from 'svelte'
 import './style.css'
 import App from './App.svelte'
 
-const PATTERN = 'E:\\插画\\花草\\подсолнух 2@WMTAI8395.png'
-const PATTERN2 = 'E:\\插画\\卡通\\Спанч Боб линии@WMTAI1623.png'
-const TPL = 'E:\\套图模板\\紫色IMD模版1.tif'
-const TPL2 = 'E:\\套图模板\\IMD白色模版.tif'
-const OUT = 'E:\\套图输出'
-const OUTDIR = 'E:\\套图输出\\подсолнух 2@WMTAI8395'
+const FRESH = new URLSearchParams(location.search).get('fresh') === '1'
+const PATTERN = 'demo/patterns/pattern-a.png'
+const PATTERN2 = 'demo/patterns/pattern-b.png'
+const TPL = 'demo/templates/template-a.tif'
+const TPL2 = 'demo/templates/template-b.tif'
+const OUT = 'demo/output'
+const OUTDIR = `${OUT}/pattern-a`
 
-// 浏览器审查用：磁盘上真实存在的套图产物（缩略图能真渲染）。
-const REAL_JPG = [
-  'E:\\套图输出\\_alltpl2\\подсолнух 2@WMTAI8395\\подсолнух 2@WMTAI8395_IMD白色模版_01.jpg',
-  'E:\\套图输出\\_alltpl2\\подсолнух 2@WMTAI8395\\подсолнух 2@WMTAI8395_IMD白色模版_02.jpg',
-  'E:\\套图输出\\_alltpl2\\подсолнух 2@WMTAI8395\\подсолнух 2@WMTAI8395_紫色IMD模版1_01.jpg',
-  'E:\\套图输出\\_alltpl2\\подсолнух 2@WMTAI8395\\подсолнух 2@WMTAI8395_紫色IMD模版1_04.jpg',
-  'E:\\套图输出\\_alltpl2\\подсолнух 2@WMTAI8395\\подсолнух 2@WMTAI8395_阶梯黑色模板_01.jpg',
-  'E:\\套图输出\\_alltpl2\\подсолнух 2@WMTAI8395\\подсолнух 2@WMTAI8395_阶梯黑色模板_06.jpg',
-]
+// 路径只是审查数据标识；预览完全内联，不读取本机文件。
+const SAMPLE_JPG = Array.from({ length: 6 }, (_, i) => `${OUTDIR}/sample-${i + 1}.jpg`)
+const PREVIEW_URL = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 320 320">' +
+  '<rect width="320" height="320" fill="#f2eee8"/>' +
+  '<rect x="86" y="34" width="148" height="252" rx="24" fill="#546d62"/>' +
+  '<circle cx="168" cy="174" r="58" fill="#e8c77c"/>' +
+  '<path d="M122 220l44-93 42 93z" fill="#efe7d5"/>' +
+  '<rect x="98" y="46" width="50" height="58" rx="12" fill="#263d36"/>' +
+  '<circle cx="112" cy="61" r="8" fill="#bcc9c2"/><circle cx="134" cy="87" r="8" fill="#bcc9c2"/>' +
+  '</svg>',
+)
 
-const fileUrl = (p: string) => '/__local/' + encodeURIComponent(p)
+const mockKey = FRESH ? '' : 'dummy'
 
 const CONFIG = {
-  base_url: 'https://www.acctoken.com/v1',
-  api_key: 'sk-mock-0000000000000000000000000000000000000000000000000',
-  model: 'deepseek-v4.1-flash',
+  base_url: 'https://example.invalid/v1',
+  api_key: mockKey,
+  model: 'demo-vision-model',
   max_tokens: 4000,
   timeout_seconds: 180,
   temperature: 0.1,
   image_max_side: 640,
   thinking: false,
   candidates: [0.85, 0.95, 1.05, 1.15, 1.3],
-  output_dir: OUT,
-  template_dir: 'E:\\套图模板',
-  pattern_dir: 'E:\\插画',
+  output_dir: FRESH ? '' : OUT,
+  template_dir: FRESH ? '' : 'demo/templates',
+  pattern_dir: FRESH ? '' : 'demo/patterns',
   group: '插画',
   fit: 'auto',
   cell_size: 800,
@@ -51,9 +55,9 @@ const CONFIG = {
   auto_tune_on: true,
   precheck_on: true,
   precheck_skip: true,
-  gen_base_url: 'https://junli1.junlistudio.com/v1',
-  gen_api_key: 'sk-mock-gen',
-  gen_model: 'gpt-image-2.5',
+  gen_base_url: 'https://example.invalid/v1',
+  gen_api_key: mockKey,
+  gen_model: 'demo-image-model',
   gen_size: '1024x1024',
   gen_thinking: false,
   gen_timeout: 300,
@@ -64,18 +68,18 @@ const CONFIG = {
 }
 
 const mkTask = (o: any) => ({
-  id: 1, pattern: PATTERN, patternName: 'подсолнух 2@WMTAI8395',
-  template: TPL, templateName: '紫色IMD模版1',
+  id: 1, pattern: PATTERN, patternName: 'pattern-a',
+  template: TPL, templateName: 'template-a',
   phase: 'pending', progress: 0, message: '', outputDir: '', files: [],
   error: '', chosenScale: 0, judgeNote: '', tuneRounds: 0, elapsedMs: 0, ...o,
 })
 
 // 一轮完整任务的各阶段快照，用于「任务队列」页覆盖所有状态徽章
 const SAMPLE_TASKS = [
-  mkTask({ id: 1, phase: 'done', progress: 100, message: '生成 6 张', chosenScale: 1.38, tuneRounds: 2, judgeNote: '图案饱满且未压摄像头，未裁切', elapsedMs: 32860, outputDir: OUTDIR, files: Array.from({ length: 6 }, (_, i) => `${OUTDIR}\\подсолнух 2@WMTAI8395_紫色IMD模版1_0${i + 1}.jpg`) }),
-  mkTask({ id: 2, template: TPL2, templateName: 'IMD白色模版', phase: 'done', progress: 100, message: '生成 7 张', chosenScale: 1.15, tuneRounds: 1, judgeNote: '饱满，未压摄像头', elapsedMs: 34700, outputDir: OUTDIR, files: Array.from({ length: 7 }, (_, i) => `${OUTDIR}\\x_0${i + 1}.jpg`) }),
-  mkTask({ id: 3, pattern: PATTERN2, patternName: 'Спанч Боб линии@WMTAI1623', phase: 'tune', progress: 72, message: '第 1 轮评审微调', chosenScale: 1.05, tuneRounds: 1 }),
-  mkTask({ id: 4, pattern: PATTERN2, patternName: 'Спанч Боб линии@WMTAI1623', template: TPL2, templateName: 'IMD白色模版', phase: 'judge', progress: 60, message: '视觉模型判断摆放' }),
+  mkTask({ id: 1, phase: 'done', progress: 100, message: '生成 6 张', chosenScale: 1.38, tuneRounds: 2, judgeNote: '图案饱满且未压摄像头，未裁切', elapsedMs: 32860, outputDir: OUTDIR, files: Array.from({ length: 6 }, (_, i) => `${OUTDIR}\\pattern-a_template-a_0${i + 1}.jpg`) }),
+  mkTask({ id: 2, template: TPL2, templateName: 'template-b', phase: 'done', progress: 100, message: '生成 7 张', chosenScale: 1.15, tuneRounds: 1, judgeNote: '饱满，未压摄像头', elapsedMs: 34700, outputDir: OUTDIR, files: Array.from({ length: 7 }, (_, i) => `${OUTDIR}\\x_0${i + 1}.jpg`) }),
+  mkTask({ id: 3, pattern: PATTERN2, patternName: 'pattern-b', phase: 'tune', progress: 72, message: '第 1 轮评审微调', chosenScale: 1.05, tuneRounds: 1 }),
+  mkTask({ id: 4, pattern: PATTERN2, patternName: 'pattern-b', template: TPL2, templateName: 'template-b', phase: 'judge', progress: 60, message: '视觉模型判断摆放' }),
   mkTask({ id: 5, phase: 'render', progress: 20, message: 'Photoshop 渲染候选' }),
   mkTask({ id: 6, phase: 'precheck', progress: 5, message: '视觉预检' }),
   mkTask({ id: 7, phase: 'pattern', progress: 5, message: '规范化图案' }),
@@ -87,18 +91,18 @@ const SAMPLE_TASKS = [
 
 const GEN_TASKS = [
   {
-    id: 1, refPath: OUTDIR + '\\подсолнух 2@WMTAI8395_紫色IMD模版1_01.jpg', refName: '…_01.jpg',
+    id: 1, refPath: OUTDIR + '\\pattern-a_template-a_01.jpg', refName: '…_01.jpg',
     mode: 'handheld', count: 2, phase: 'done', progress: 100, message: '生成 2 张',
     files: [
-      { path: REAL_JPG[2], mode: 'handheld', index: 1, same: true, diff: '', reason: '' },
-      { path: REAL_JPG[3], mode: 'handheld', index: 2, same: false, diff: '壳面图案位置偏移约 6px', reason: '图案位置偏移' },
+      { path: SAMPLE_JPG[2], mode: 'handheld', index: 1, same: true, diff: '', reason: '' },
+      { path: SAMPLE_JPG[3], mode: 'handheld', index: 2, same: false, diff: '壳面图案位置偏移约 6px', reason: '图案位置偏移' },
     ],
     error: '', consistent: false, elapsedMs: 41200,
   },
-  { id: 2, refPath: OUTDIR + '\\подсолнух 2@WMTAI8395_紫色IMD模版1_02.jpg', refName: '…_02.jpg', mode: 'background', count: 2, phase: 'generate', progress: 50, message: '生成第 1/2 张', files: [], error: '', consistent: false, elapsedMs: 0 },
+  { id: 2, refPath: OUTDIR + '\\pattern-a_template-a_02.jpg', refName: '…_02.jpg', mode: 'background', count: 2, phase: 'generate', progress: 50, message: '生成第 1/2 张', files: [], error: '', consistent: false, elapsedMs: 0 },
 ]
 
-let genTasks: any[] = GEN_TASKS
+let genTasks: any[] = FRESH ? [] : GEN_TASKS
 
 // 按参考图 × 模式 造生图任务，并逐阶段推进（模拟真实生成节奏）。
 function buildGenTasks(opt: any) {
@@ -133,7 +137,13 @@ function playGen() {
     t.phase = next
     t.progress = Math.round(((GEN_PHASES.indexOf(next) + 1) / GEN_PHASES.length) * 100)
     t.message = next === 'gen' ? `生成第 1/${t.count} 张` : next === 'verify' ? '视觉校验一致性' : next === 'done' ? `生成 ${t.count} 张` : '等待'
-    if (next === 'done') { t.files = REAL_JPG.slice(0, t.count); t.consistent = true; t.elapsedMs = 41000 }
+    if (next === 'done') {
+      t.files = SAMPLE_JPG.slice(0, t.count).map((path, index) => ({
+        path, mode: t.mode, index: index + 1, same: true, reason: '', diff: '', retried: false,
+      }))
+      t.consistent = true
+      t.elapsedMs = 41000
+    }
     emit('titao:gen', {
       type: 'task', task: { ...t },
       done: genTasks.filter((x: any) => x.phase === 'done').length,
@@ -145,10 +155,11 @@ function playGen() {
 }
 
 let runState = 'idle'
-let runTasks = SAMPLE_TASKS
+let runTasks = FRESH ? [] : SAMPLE_TASKS
 let genState = 'idle'
 // 用 sessionStorage 记住「上次没跑完」，刷新页面后仍能审查补跑横幅。
 let pendingQueue: any = (() => {
+  if (FRESH) return null
   try { const v = sessionStorage.getItem('__mock_pending'); return v ? JSON.parse(v) : null } catch { return null }
 })()
 function setPending(v: any) {
@@ -181,36 +192,36 @@ function playRun() {
     const next = PHASES[Math.min(i + 1, PHASES.length - 1)]
     t.phase = next
     t.progress = Math.round(((PHASES.indexOf(next) + 1) / PHASES.length) * 100)
-    if (next === 'done') { t.files = REAL_JPG.slice(0, 6); t.chosenScale = 1.15; t.tuneRounds = 2; t.judgeNote = '图案饱满且未压摄像头'; t.elapsedMs = 20100 }
+    if (next === 'done') { t.files = SAMPLE_JPG.slice(0, 6); t.chosenScale = 1.15; t.tuneRounds = 2; t.judgeNote = '图案饱满且未压摄像头'; t.elapsedMs = 20100 }
     emit('titao:event', { type: 'task', task: { ...t }, done: runTasks.filter((x: any) => x.phase === 'done').length, failed: 0, state: 'running' })
     emit('titao:event', { type: 'log', level: 'info', message: `[${t.id}] ${t.patternName} × ${t.templateName} → ${next}` })
   }, 900)
 }
 
 const handlers: Record<string, (...a: any[]) => any> = {
-  GetConfig: () => ({ config: structuredClone(CONFIG), path: 'E:\\套图程序-go\\app\\build\\bin\\config.json' }),
+  GetConfig: () => ({ config: structuredClone(CONFIG), path: 'demo/config.json' }),
   SaveConfig: (c: any) => { Object.assign(CONFIG, c); return structuredClone(CONFIG) },
   OpenConfigFile: () => null,
   CheckPhotoshop: () => ({ available: true, version: '27.7.0', error: '', checked: true }),
-  AppVersion: () => '0.3.1',
+  AppVersion: () => '0.3.2',
   PSCaps: () => ({
     version: '27.7.0', major: 27, verified: true,
     doJavaScript: true, noDialogs: true, editSmartObject: true, replaceContents: false,
     summary: 'Photoshop 27.x（已验证） · DoJavaScript 是 · 关闭模态框 是 · 编辑智能对象 是 · 替换智能对象 否',
     notes: ['Photoshop 27.x 为已实测版本，全部核心能力可用。', '不启用 placedLayerReplaceContents：它会破坏模板原有的透视变换。'],
   }),
-  CheckUpdate: () => ({ checked: true, hasNew: true, current: '0.3.1', latest: 'v0.3.2', notes: '## v0.3.2\n- 下一版演示用', url: 'https://github.com/z2476720314-sys/titao-workbench/releases', asset: 'https://example.com/titao.exe', size: 12000000, error: '' }),
-  InstallUpdate: () => '已下载 v0.3.1，替换脚本已就绪。关闭程序后会自动替换。',
+  CheckUpdate: () => ({ checked: true, hasNew: true, current: '0.3.2', latest: 'v0.3.3', notes: '## v0.3.3\n- 下一版演示用', url: 'https://example.invalid/releases', asset: 'https://example.invalid/titao.exe', size: 12000000, error: '' }),
+  InstallUpdate: () => '已模拟下载 v0.3.3，未修改任何文件。',
 
   PickPatterns: () => [PATTERN, PATTERN2],
-  PickPatternDir: () => 'E:\\插画',
+  PickPatternDir: () => 'demo/patterns',
   PickTemplates: () => [TPL, TPL2],
-  PickTemplateDir: () => 'E:\\套图模板',
+  PickTemplateDir: () => 'demo/templates',
   PickOutputDir: () => OUT,
-  PickGenRefs: () => [OUTDIR + '\\подсолнух 2@WMTAI8395_紫色IMD模版1_01.jpg'],
+  PickGenRefs: () => [OUTDIR + '\\pattern-a_template-a_01.jpg'],
   ListDir: () => [],
   ProbeTemplate: () => ({
-    name: '紫色IMD模版1.tif', width: 800, height: 4800, cellSize: 800, rows: 6,
+    name: 'template-a.tif', width: 800, height: 4800, cellSize: 800, rows: 6,
     guides: [0, 800, 1600, 2400, 3200, 4000, 4800],
     groups: ['插画', '底图'],
     layers: [
@@ -220,7 +231,7 @@ const handlers: Record<string, (...a: any[]) => any> = {
       { name: '底图', kind: 'LayerSet', visible: true, opacity: 100, blend: 'PASSTHROUGH', children: 6 },
       { name: '背景', kind: 'ArtLayer', visible: true, opacity: 100, blend: 'NORMAL', children: 0 },
     ],
-    artGroups: [{ name: '插画', smartObjects: 6, cells: 6 }],
+    artGroups: [{ group: '插画', psbs: ['pattern.psb'], count: 6 }],
   }),
   PlanTasks: () => SAMPLE_TASKS.slice(0, 2),
   // 开始套图：把 PlanTasks 的结果逐条推进，模拟真实事件流，便于审查任务表与日志。
@@ -243,17 +254,16 @@ const handlers: Record<string, (...a: any[]) => any> = {
   RevealInExplorer: () => null,
   OpenOutputDir: () => null,
   NormalizePreview: () => ({ path: PATTERN, width: 944, height: 1802, trimmed: true, bbox: [1, 73, 945, 1875] }),
-  PreviewPattern: (p: string) => fileUrl(p),
-  PreviewCell: (p: string) => fileUrl(p),
-  PreviewGenerated: (p: string) => fileUrl(p),
+  PreviewPattern: () => PREVIEW_URL,
+  PreviewCell: () => PREVIEW_URL,
+  PreviewGenerated: () => PREVIEW_URL,
 
-  // 用磁盘上真实存在的 JPG，浏览器审查时缩略图能真渲染出来。
-  ListOutputs: () => ([
-    { name: 'подсолнух 2@WMTAI8395', dir: OUTDIR, count: REAL_JPG.length, files: REAL_JPG },
-  ]),
-  ListGenerated: () => ([
-    { name: 'подсолнух 2@WMTAI8395', dir: OUTDIR + '\\生成图', count: 3, files: [REAL_JPG[2], REAL_JPG[4], REAL_JPG[5]] },
-  ]),
+  ListOutputs: () => (CONFIG.output_dir ? [
+    { name: 'pattern-a', dir: OUTDIR, count: SAMPLE_JPG.length, files: SAMPLE_JPG },
+  ] : []),
+  ListGenerated: () => (CONFIG.output_dir ? [
+    { name: 'pattern-a', dir: OUTDIR + '\\生成图', count: 3, files: [SAMPLE_JPG[2], SAMPLE_JPG[4], SAMPLE_JPG[5]] },
+  ] : []),
 
   StartGen: (opt: any) => {
     genTasks = buildGenTasks(opt)
@@ -324,7 +334,7 @@ const handlers: Record<string, (...a: any[]) => any> = {
   genIdle: () => { genState = 'idle' },
   genRun: () => { genState = 'running' },
   // 切「已配 Key / 未配 Key」，用于审查生图按钮可用性与缺 Key 提示
-  genKey: (on = true) => { CONFIG.gen_api_key = on ? 'sk-mock-gen' : ''; emit('titao:event', { type: 'log', level: 'info', message: 'mock: gen key ' + (on ? 'on' : 'off') }) },
+  genKey: (on = true) => { CONFIG.gen_api_key = on ? 'demo-key-not-a-credential' : ''; emit('titao:event', { type: 'log', level: 'info', message: 'mock: gen key ' + (on ? 'on' : 'off') }) },
   log: (level: string, message: string) => emit('titao:event', { type: 'log', level, message }),
   event: (ev: any) => emit('titao:event', ev),
 }

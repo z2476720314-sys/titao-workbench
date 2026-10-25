@@ -58,7 +58,7 @@
 <输出目录>/<图案名>/<图案名>_<模板名>_NN.jpg
 ```
 
-默认输出目录 `E:\套图输出`。同一图案套多个模板时，成品都在同一个图案名目录下，靠文件名区分模板。
+首次运行的模板、图案和输出目录均为空，请在界面选择并保存。已有配置中的路径保持不变。同一图案套多个模板时，成品都在同一个图案名目录下，靠文件名区分模板。
 
 预检记录写在 `config.json` 同目录的 `precheck.jsonl`，一行一个文件，
 用 `path + size + mtime` 三元组命中才算已处理 —— 文件任一属性变化就重新判，避免重复烧模型额度。
@@ -85,9 +85,9 @@
   "auto_tune_on": true,                       // 关闭后只用第一轮选档结果
   "precheck_on": true,                        // 套图前做视觉预检
   "precheck_skip": true,                      // 预检不合格就跳过（关闭则只警告仍套）
-  "template_dir": "E:\\套图模板",
-  "pattern_dir": "E:\\插画",
-  "output_dir": "E:\\套图输出",
+  "template_dir": "",
+  "pattern_dir": "",
+  "output_dir": "",
   "group": "插画",
   "fit": "auto",
   "cell_size": 800,
@@ -170,13 +170,19 @@ cd frontend && pnpm install && pnpm run dev     # http://localhost:5180
 
 ### 端到端探针
 
-`cmd/probe` 不经 GUI 直接驱动引擎跑一次真实套图，路径硬编码在源码里（避免 shell 传参破坏西里尔文/中文路径），产物落在 `E:\Temp\out\go-probe`。
+`cmd/probe` 不经 GUI 直接驱动引擎跑一次真实套图，所有路径必须显式传入。路径含空格、中文或其他文字时加引号：
 
-`cmd/precheck-sample` 用真实图库抽样验收预检，只读不写：
-
-```bash
-go run ./cmd/precheck-sample -dir "Z:\美国" -n 24
+```text
+go run ./cmd/probe -config "<配置目录>" -pattern "<图案文件>" -template "<模板文件>" -out "<输出目录>"
 ```
+
+`cmd/precheck-sample` 用真实图库抽样验收预检，不修改图库；结果追加到配置目录中的 `precheck.sample.jsonl`，保留历史记录，不影响正式预检记录：
+
+```text
+go run ./cmd/precheck-sample -config "<配置目录>" -dir "<图库目录>" -n 24
+```
+
+`-config` 必须包含已有 `config.json`。`-n` 必须大于零，`-start` 为非负索引，`-stride 0` 表示自动步长。两个工具均拒绝错误参数。`probe` 对任务失败、零导出或无效导出文件返回非零状态；它沿用套图引擎的模型失败回退策略。`precheck-sample` 对模型、图片或记录写入失败返回非零状态，模型失败不计作合格样本。
 
 ## 自动更新
 

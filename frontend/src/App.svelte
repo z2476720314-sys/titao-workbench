@@ -309,17 +309,7 @@
       const r: any = await api.GetConfig()
       conf = r.config
       confPath = r.path
-      outputDir = conf.output_dir || ''
-      group = conf.group || '插画'
-      fit = conf.fit || 'auto'
-      trimAlpha = conf.trim_alpha !== false
-      noCrop = conf.no_crop !== false
-      jpgQuality = conf.jpg_quality || 95
-      cellSize = conf.cell_size || 800
-      offsetX = conf.offset_x || 0
-      offsetY = conf.offset_y || 0
-      genCount = conf.gen_count || 2
-      genHasKey = !!conf.gen_api_key
+      syncConfigToForms()
     } catch (e: any) {
       notify('err', '加载配置失败：' + e)
     }
@@ -678,20 +668,28 @@
   }
 
   // ---------------- 配置 ----------------
+  function syncConfigToForms() {
+    outputDir = conf.output_dir || ''
+    group = conf.group || '插画'
+    fit = conf.fit || 'auto'
+    trimAlpha = conf.trim_alpha !== false
+    noCrop = conf.no_crop !== false
+    jpgQuality = conf.jpg_quality || 95
+    cellSize = conf.cell_size || 800
+    offsetX = conf.offset_x || 0
+    offsetY = conf.offset_y || 0
+    auto = conf.auto_tune_on !== false
+    maxRounds = conf.max_rounds ?? 2
+    genCount = conf.gen_count || 2
+    genHasKey = !!conf.gen_api_key
+  }
+
   async function saveConf() {
     if (!conf) return
     savingConf = true
     try {
-      conf.output_dir = outputDir
-      conf.group = group
-      conf.fit = fit
-      conf.trim_alpha = trimAlpha
-      conf.no_crop = noCrop
-      conf.jpg_quality = Number(jpgQuality) || 95
-      conf.cell_size = Number(cellSize) || 800
-      conf.offset_x = Number(offsetX) || 0
-      conf.offset_y = Number(offsetY) || 0
-      await api.SaveConfig(conf)
+      conf = await api.SaveConfig(conf)
+      syncConfigToForms()
       confSaved = '已保存'
       setTimeout(() => (confSaved = ''), 2200)
     } catch (e: any) {

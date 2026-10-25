@@ -45,6 +45,9 @@ titao-update.bat
 # 运行时配置（含用户 API Key，绝不入库）
 config.json
 build/bin/config.json
+queue.json
+precheck.jsonl
+precheck.sample*.jsonl
 
 # 测试与覆盖率
 coverage.out
