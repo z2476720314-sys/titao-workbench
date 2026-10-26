@@ -6,7 +6,7 @@
 //
 // 设计取舍：
 //   - 只送缩略图（imgutil.ThumbDataURL），一次判定约等于一次选档的 token 成本。
-//   - 模型失败一律放行：宁可多套一张，也不能因为接口抽风让整批任务不动。
+//   - 模型失败保持未确认，由任务引擎按预检跳过开关决定是否继续。
 //   - 判定结果落 precheck.jsonl，path+size+mtime 三者全同才算命中；
 //     用户替换了同名文件（size 或 mtime 变了）会自动重判。
 package precheck
@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -30,16 +29,16 @@ type Config = judge.Config
 
 // Verdict 是一次预检结论。
 type Verdict struct {
-	// OK 为 true 表示可以套图。模型失败时也为 true（放行）。
+	// OK 为 true 只表示四项检查均通过，失败时保持 false。
 	OK bool `json:"ok"`
-	// Reason 是模型给的中文短理由（15 字内，可能为空）。
+	// Reason 是模型描述的可见特征或通过理由。
 	Reason string `json:"reason"`
 	// Tags 是命中的问题类型，取值见 TagXxx。
 	Tags []string `json:"tags"`
 
 	// Cached 表示结论来自记录库，本次没有调用模型。
 	Cached bool `json:"-"`
-	// Fallback 表示模型调用/解析失败，按放行处理。
+	// Fallback 表示模型调用/解析失败，不能视为已通过。
 	Fallback bool `json:"-"`
 	// Err 是失败原因（Fallback 为 true 时非空）。
 	Err error `json:"-"`
@@ -56,53 +55,26 @@ const (
 	TagUnknown   = "unknown"    // 判不合格但模型没给 tag
 )
 
-const promptText = `你是手机壳图案质检员。这张图是准备印到手机壳上的**图案素材**（不是手机壳实拍）。
+const promptText = `逐项检查输入图片的真实内容，不要预设它是干净插画；它可能是手机壳成品、带开孔的壳面设计，或水印素材。
+这张图将作为一整幅图案再次印到另一张手机壳上，原图已有的镜头孔、镜头框、壳轮廓绝不能再次印进去。
 
-任务：判断它能不能直接拿去套图。只有「干净的一整幅图案」才算合格。
+请分别判断下面四项，四个布尔字段必须全部输出。由程序据此决定是否套图，不要输出总评 ok。
 
-判 ok=false 只有这四种情况：
+1. watermark：是否有后加水印。任何位置出现 shuiyin、shui yin、hituku、Seu Nome 及花体/斜写变形，都算；不要因为文字小或与配色一致就放行。网址、店名水印、无关随机字母叠加也算。普通设计文字（Happy、Lucky、Hello Kitty、品牌图案、报纸拼贴）本身不算水印。
+2. lens：是否保留了供手机摄像头使用的开孔、镜头保护框或摄像头岛。包括左上角三圆孔、多圆孔；顶部横向大圆角矩形；内部是透明、纯色、波点、卡通小图案都算，不要求空白，也不要求真实镜头照片。单独一块带镜头孔的装饰保护板同样算。
+   优先结构规则：图片上方独立横向大圆角矩形面板（接近画布宽，约占上面三分之一），下方另有散落贴纸/主体图案，这是分体式壳面设计，必须 lens=true。框内有星空、波点、小猫、小狗、花纹、完整小插画也不能例外；不能以“星空装饰框”“卡通相框”解释后放行。此结构规则优先于普通装饰相框例外。
+3. case_edge：是否保留了手机壳本体形状、四周壳边、长条圆角矩形壳面背景、壳体外轮廓或切割线。即使已抠透明底、没有手持实拍，也仍然算壳体。顶部镜头区加下方壳身的分体设计也算。正常矩形壁纸、花卉纹理、人物自身轮廓、普通装饰花边不算；以是否还带手机壳结构判断，不能只看长宽比例。
+4. case_photo：是否是手机/手机壳商品实拍、手持商品、带场景背景的手机壳图。
 
-1. **商家水印**（tag: watermark）：卖家盖在图案上的叠加文字。
-   **强规则**：图中任何位置出现 shuiyin、hituku、Seu Nome、shui yin、shuiyin 变形
-   这类**拼音/葡语词**，不管字体多手写、多花体、多淡、多小、斜置还是重复，
-   一律判 watermark、ok=false。这类词就是水印，不可能是图案设计。
-   另外：网址、无意义字母串（如 U8FT3LE7）、与画风无关的突兀叠加文字，也算。
-   **不算水印**（图案设计本身，必须放行）：
-   - 正常英文装饰词：enlife story、Happy、LUCKY、LOVELY、EVERYTHING IT'S OK、STEP BY STEP；
-   - 拼贴图里的报纸/杂志碎字、印章风文字、署名风插图文字、品牌风 logo 排版。
-   区分要点：装饰英文与图案同色系、融进画面；拼音水印词突兀、像后贴上去的。
-
-2. **镜头框**（tag: lens）：手机壳背面摄像头位置的**空框**。
-   典型特征：位于图的最上方，宽度接近图宽（占 50%-100%），高度约图高的 1/5 到 1/3，
-   圆角矩形，**框内基本是空白或只有零散小图案**，框线粗、边缘常直接切到图外，
-   有的框内还带 1-3 个正圆孔。
-   **不算镜头框**：拼贴图里的装饰圆环、相框、气泡框、心形/星形外框、
-   卡通图案里画的相机造型插画、包住主体图案的装饰性边框。
-
-3. **壳边框**（tag: case-edge）：手机壳本体的外轮廓、圆角矩形壳体边、摄像头凸起台阶。
-
-4. **壳实拍**（tag: case-photo）：整张图本身就是手机壳实拍、手机实拍或商品场景图。
-
-合格标准：整张图是一幅图案/插画/纹理，没有商家水印、没有壳体轮廓、没有镜头空框。
-
-**除上面四类之外拿不准，一律判 ok=true**：漏套一张的成本远低于错杀一张。
-但第 1 条的拼音水印词是硬规则，看到就判 false。
-
-只输出一行 JSON，不要任何解释：
-{"ok": true, "reason": "<15字内>", "tags": []}
-
-tags 只能从 watermark、lens、case-edge、case-photo 里选。合格时 tags 给空数组。`
-
-var (
-	reOK     = regexp.MustCompile(`"ok"\s*:\s*(true|false)`)
-	reReason = regexp.MustCompile(`"reason"\s*:\s*"([^"]*)"`)
-	reTags   = regexp.MustCompile(`"tags"\s*:\s*\[([^\]]*)\]`)
-)
+重点检查图片顶部、左上角、四个外角与四周边线，再看细小文字。透明区域在本预览中铺白底，不影响上述判定。
+例如：顶部大圆角镜头保护区内有可爱小狗、下方还有图案，lens 仍为 true；完整圆角壳身加三颗摄像头孔，lens 和 case_edge 都为 true。
+只输出一行 JSON，值必须依据图片，不能照抄示例：
+{"watermark":false,"lens":false,"case_edge":false,"case_photo":false,"reason":"具体可见特征或干净图案"}`
 
 // Check 调视觉模型判定一张图案。thumbDataURL 是 imgutil.ThumbDataURL 的产物。
 //
-// 网络/解析失败时不返回错误，而是 Verdict{OK:true, Fallback:true, Err:...}，
-// 由调用方照常套图并记一条警告。
+// 网络/解析失败时返回 Verdict{Fallback:true, Err:...}，
+// 由调用方决定标失败或在显式宽松设置下继续。
 func Check(cfg Config, thumbDataURL string) Verdict {
 	if strings.TrimSpace(thumbDataURL) == "" {
 		return fallback(fmt.Errorf("缩略图为空"))
@@ -122,8 +94,9 @@ func Check(cfg Config, thumbDataURL string) Verdict {
 		"max_tokens":  cfg.MaxTokens,
 		"temperature": cfg.Temperature,
 	}
-	if !cfg.Thinking {
-		body["enable_thinking"] = false
+	judge.ApplyThinking(body, cfg.Model, cfg.Thinking)
+	if strings.HasPrefix(strings.ToLower(cfg.Model), "deepseek") {
+		body["response_format"] = map[string]string{"type": "json_object"}
 	}
 
 	payload, err := json.Marshal(body)
@@ -181,47 +154,43 @@ func Check(cfg Config, thumbDataURL string) Verdict {
 //
 // 单独导出是为了让单测不必起 HTTP 服务就能覆盖解析分支。
 func Parse(blob, raw string) Verdict {
-	v := Verdict{OK: true, Raw: raw}
-
-	m := reOK.FindStringSubmatch(blob)
-	if m == nil {
-		return fallback(fmt.Errorf("模型输出里没有 ok 字段: %.200s", blob))
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		text = strings.TrimSpace(blob)
 	}
-	if r := reReason.FindStringSubmatch(blob); r != nil {
-		v.Reason = strings.TrimSpace(r[1])
+	start, end := strings.Index(text, "{"), strings.LastIndex(text, "}")
+	if start < 0 || end < start {
+		return fallback(fmt.Errorf("预检未返回检查清单"))
 	}
-	v.OK = m[1] == "true"
-
-	if t := reTags.FindStringSubmatch(blob); t != nil {
-		v.Tags = splitTags(t[1])
+	var checks struct {
+		Watermark *bool  `json:"watermark"`
+		Lens      *bool  `json:"lens"`
+		CaseEdge  *bool  `json:"case_edge"`
+		CasePhoto *bool  `json:"case_photo"`
+		Reason    string `json:"reason"`
 	}
-	if !v.OK && len(v.Tags) == 0 {
-		v.Tags = []string{TagUnknown}
+	if err := json.Unmarshal([]byte(text[start:end+1]), &checks); err != nil {
+		return fallback(fmt.Errorf("预检检查清单无效: %w", err))
+	}
+	if checks.Watermark == nil || checks.Lens == nil || checks.CaseEdge == nil || checks.CasePhoto == nil || strings.TrimSpace(checks.Reason) == "" {
+		return fallback(fmt.Errorf("预检检查清单缺少字段，未确认合格"))
+	}
+	v := Verdict{OK: true, Reason: strings.TrimSpace(checks.Reason), Tags: []string{}, Raw: raw}
+	for _, item := range []struct {
+		flag *bool
+		tag  string
+	}{{checks.Watermark, TagWatermark}, {checks.Lens, TagLens}, {checks.CaseEdge, TagCaseEdge}, {checks.CasePhoto, TagCasePhoto}} {
+		if *item.flag {
+			v.OK = false
+			v.Tags = append(v.Tags, item.tag)
+		}
 	}
 	return v
 }
 
-// splitTags 把 `"watermark", "lens"` 拆成干净的小写标签，只保留已知取值。
-func splitTags(s string) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, part := range strings.Split(s, ",") {
-		t := strings.ToLower(strings.Trim(strings.TrimSpace(part), `"'`))
-		if t == "" || seen[t] {
-			continue
-		}
-		switch t {
-		case TagWatermark, TagLens, TagCaseEdge, TagCasePhoto, TagUnknown:
-			seen[t] = true
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
-// fallback 造一个「放行」结论：模型挂了也不能拦住整批套图。
+// fallback 保留未确认状态，不伪造合格结论。
 func fallback(err error) Verdict {
-	return Verdict{OK: true, Fallback: true, Err: err}
+	return Verdict{Fallback: true, Err: err}
 }
 
 // TagLabel 把 tag 翻成中文，用于汇总文案。

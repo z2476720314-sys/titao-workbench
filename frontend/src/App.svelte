@@ -23,6 +23,7 @@
   let psStatus: any = { available: false, version: '', error: '', checked: false }
   let psChecking = true
   let psCaps: any = null
+  $: engineName = psStatus.engine || 'Photoshop'
 
   // 版本与更新
   let appVersion = ''
@@ -44,7 +45,7 @@
   let jpgQuality = 95
   let cellSize = 800
   let patternName = ''
-  let maxRounds = 2
+  let maxRounds = 3
   let noCrop = true
   let advOpen = false
 
@@ -404,6 +405,7 @@
     }
     if (ev.type === 'done') {
       running = false
+      refreshPS()
       runState = ev.state || 'idle'
       doneCount = ev.done ?? doneCount
       failedCount = ev.failed ?? failedCount
@@ -520,7 +522,7 @@
   async function startRun() {
     if (!patternPaths.length) return notify('warn', '请先添加图案')
     if (!templatePaths.length) return notify('warn', '请先添加模板')
-    if (!psStatus.available) return notify('err', 'Photoshop 未就绪：' + (psStatus.error || '未知'))
+    if (!psStatus.available) return notify('err', engineName + ' 未就绪：' + (psStatus.error || '未知'))
 
     const scales = manualScale
       .split(/[,，\s]+/)
@@ -679,7 +681,7 @@
     offsetX = conf.offset_x || 0
     offsetY = conf.offset_y || 0
     auto = conf.auto_tune_on !== false
-    maxRounds = conf.max_rounds ?? 2
+    maxRounds = conf.max_rounds ?? 3
     genCount = conf.gen_count || 2
     genHasKey = !!conf.gen_api_key
   }
@@ -736,7 +738,7 @@
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-title">套图工作台</div>
-      <div class="brand-sub">Photoshop 自动套壳</div>
+      <div class="brand-sub">智能对象自动套壳</div>
     </div>
 
     <nav class="nav">
@@ -757,10 +759,11 @@
     </nav>
 
     <div class="sidebar-foot">
-      <span class="dot" class:ok={psStatus.available} class:bad={psStatus.checked && !psStatus.available} class:idle={!psStatus.checked}></span>
+      <span class="dot" class:ok={psStatus.available && !psStatus.pending} class:bad={psStatus.checked && !psStatus.available} class:idle={!psStatus.checked || psStatus.pending}></span>
       <span>
         {#if psChecking}检测中…
-        {:else if psStatus.available}PS {psStatus.version}
+        {:else if psStatus.pending}{engineName} · 待启动
+        {:else if psStatus.available}{engineName} {psStatus.version}
         {:else}未连接{/if}
       </span>
       {#if appVersion}<span class="ver">v{appVersion}</span>{/if}
@@ -781,7 +784,7 @@
           {#if upd.asset}可以直接下载替换；{:else}该版本没有提供 exe，请到发布页手动下载。{/if}
         </span>
         {#if upd.asset}
-          <button class="primary" on:click={doInstallUpdate} disabled={updBusy}>
+          <button class="primary" on:click={doInstallUpdate} disabled={updBusy || running || genRunning}>
             {updBusy ? '下载中…' : '下载并更新'}
           </button>
         {/if}
@@ -816,12 +819,12 @@
             模板与图案都只读，成品写到输出目录。
           </div>
         </div>
-        <button on:click={refreshPS} disabled={psChecking}>重连 Photoshop</button>
+        <button on:click={refreshPS} disabled={psChecking}>检测 {engineName}</button>
       </div>
 
       {#if psStatus.checked && !psStatus.available}
         <div class="notice err">
-          Photoshop 未就绪：{psStatus.error || '请确认已安装并至少启动过一次'}
+          {engineName} 未就绪：{psStatus.error || '请检查已安装的套图引擎'}
         </div>
       {/if}
 
@@ -1061,7 +1064,7 @@
       <div class="page-head">
         <div>
           <h1 class="page-title">任务队列</h1>
-          <div class="page-desc">每个「图案 × 模板」是一个组合，串行执行（Photoshop 不能并发驱动）。</div>
+          <div class="page-desc">每个「图案 × 模板」是一个组合，按组合串行渲染，支持暂停与继续。</div>
         </div>
         <div class="row">
           {#if runState === 'running'}
@@ -1496,6 +1499,28 @@
         <section class="card">
           <div class="card-head">
             <div>
+              <div class="card-title">套图引擎</div>
+              <div class="card-hint">保存并重启工作台应用选择；启动任务后才连接套图软件。当前选择 {engineName}。</div>
+            </div>
+          </div>
+          <div class="field">
+            <label class="lbl" for="renderer">套图引擎</label>
+            <select id="renderer" bind:value={conf.renderer}>
+              <option value="photoshop">Adobe Photoshop</option>
+              <option value="photocraft">PhotoCraft</option>
+            </select>
+          </div>
+          {#if conf.renderer === 'photocraft'}
+            <div class="field">
+              <label class="lbl" for="photocraft-cli">PhotoCraft 命令行程序</label>
+              <input id="photocraft-cli" type="text" bind:value={conf.photocraft_cli} placeholder="留空自动检测已安装的 photocraft-cli.exe" />
+              <div class="hint">使用本机无界面引擎，不需要打开 PhotoCraft 窗口。</div>
+            </div>
+          {/if}
+        </section>
+        <section class="card">
+          <div class="card-head">
+            <div>
               <div class="card-title">视觉模型</div>
               <div class="card-hint">用于自动判断图案摆放大小</div>
             </div>
@@ -1708,7 +1733,7 @@
               <span class="lbl">最大迭代轮数</span>
               <input type="number" min="1" max="3" bind:value={conf.max_rounds} />
               <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-                每多一轮多一次 PS 渲染 + 一次模型调用。2 轮通常够用，3 轮最稳但更慢。
+                默认最多 3 轮，每次渲染后均评审；未通过会提示人工复核。轮数越多，耗时和模型用量越高。
               </div>
             </div>
           </div>
@@ -1728,7 +1753,7 @@
                 <span style="color:var(--text);font-size:12px">命中即跳过（不套图）</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                关闭时只记录不跳过，仍会套图。判定结果存在 config.json 同目录的 precheck.jsonl，同一张图不会重复送模型。
+            开启后，问题图跳过；预检无法确认的任务标失败，继续处理其他图案。关闭时仅警告并继续。新版规则会重新检查旧缓存。
               </div>
             </div>
           </div>
@@ -1803,12 +1828,12 @@
         <div class="card-head">
           <div>
             <div class="card-title">环境</div>
-            <div class="card-hint">首次运行自动探测 Photoshop 版本并适配能力</div>
+            <div class="card-hint">启动时检测所选套图引擎</div>
           </div>
           <button on:click={checkUpdate} disabled={updBusy}>检查更新</button>
         </div>
         <dl class="kv">
-          <dt>Photoshop</dt><dd>{psStatus.available ? 'v' + psStatus.version : '未连接'}</dd>
+          <dt>{engineName}</dt><dd>{psStatus.available ? 'v' + psStatus.version : '未连接'}</dd>
           <dt>程序版本</dt>
           <dd>
             v{appVersion || '—'}
@@ -1825,7 +1850,7 @@
         </dl>
       </section>
 
-      {#if psCaps}
+      {#if psCaps && !psStatus.pending && engineName === 'Photoshop'}
         <section class="card">
           <div class="card-head">
             <div>

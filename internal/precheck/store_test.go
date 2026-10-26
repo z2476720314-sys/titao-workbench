@@ -8,7 +8,7 @@ import (
 )
 
 func rec(path string, size, mtime int64, ok bool, reason string) Record {
-	return Record{Path: path, Size: size, MTime: mtime, OK: ok, Reason: reason,
+	return Record{PolicyVersion: PolicyVersion, Path: path, Size: size, MTime: mtime, OK: ok, Reason: reason,
 		Tags: []string{TagWatermark}}
 }
 

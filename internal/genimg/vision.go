@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"titao/internal/judge"
 )
 
 // VisionConfig 是视觉模型配置（复用 cfg 里已有的视觉模型通道）。
@@ -251,9 +253,7 @@ func chat(ctx context.Context, vc VisionConfig, text string, images [][]byte) (s
 		"max_tokens":  vc.MaxTokens,
 		"temperature": vc.Temperature,
 	}
-	if !vc.Thinking {
-		body["enable_thinking"] = false
-	}
+	judge.ApplyThinking(body, vc.Model, vc.Thinking)
 
 	payload, err := json.Marshal(body)
 	if err != nil {

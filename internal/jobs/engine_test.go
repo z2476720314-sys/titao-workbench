@@ -29,7 +29,7 @@ func newTestEngine(t *testing.T) (*Engine, *cfg.Store, *recorder) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	if _, err := store.Update(func(c *cfg.Config) { c.OutputDir = filepath.Join(dir, "output") }); err != nil {
+	if _, err := store.Update(func(c *cfg.Config) { c.OutputDir = filepath.Join(dir, "output"); c.PrecheckOn = false }); err != nil {
 		t.Fatal(err)
 	}
 	rec := &recorder{}
@@ -534,6 +534,9 @@ func TestResumeFromQueueAfterCrash(t *testing.T) {
 	store, err := cfg.NewStore(dir)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
+	}
+	if _, err := store.Update(func(c *cfg.Config) { c.PrecheckOn = false }); err != nil {
+		t.Fatal(err)
 	}
 
 	// 模拟「跑到一半被强杀」：磁盘上有一份队列，前两组 done，第三组卡在 running

@@ -36,6 +36,9 @@ type QueueTask struct {
 	Error        string   `json:"error,omitempty"`
 	ChosenScale  float64  `json:"chosen_scale,omitempty"`
 	ElapsedMS    int64    `json:"elapsed_ms,omitempty"`
+	Message      string   `json:"message,omitempty"`
+	JudgeNote    string   `json:"judge_note,omitempty"`
+	TuneRounds   int      `json:"tune_rounds,omitempty"`
 }
 
 // Queue 是一次运行的完整落盘镜像。
@@ -105,6 +108,9 @@ func NewQueue(opt Options, tasks []*Task) *Queue {
 			Error:        t.Error,
 			ChosenScale:  t.ChosenScale,
 			ElapsedMS:    t.ElapsedMS,
+			Message:      t.Message,
+			JudgeNote:    t.JudgeNote,
+			TuneRounds:   t.TuneRounds,
 		}
 	}
 	q.Pending = q.CountPending()
@@ -129,6 +135,9 @@ func (q *Queue) ToTasks() []*Task {
 			Error:        qt.Error,
 			ChosenScale:  qt.ChosenScale,
 			ElapsedMS:    qt.ElapsedMS,
+			Message:      qt.Message,
+			JudgeNote:    qt.JudgeNote,
+			TuneRounds:   qt.TuneRounds,
 		}
 		// 已完成的组进度条要显示满格，否则界面看着像卡在 0%
 		if qt.Phase == PhaseDone || qt.Phase == PhaseSkipped {

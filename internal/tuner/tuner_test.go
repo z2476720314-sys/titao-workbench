@@ -7,12 +7,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"titao/internal/judge"
 )
 
 func testCfg(url string) Config {
 	return Config{
 		BaseURL:      url,
-		APIKey:       "test-key",
+		APIKey:       "dummy",
 		Model:        "test-model",
 		MaxTokens:    1000,
 		Timeout:      5 * time.Second,
@@ -28,7 +30,7 @@ func fakeChat(t *testing.T, content, reasoning string) *httptest.Server {
 		if r.URL.Path != "/chat/completions" {
 			t.Errorf("路径错误: %s", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+		if got := r.Header.Get("Authorization"); got != "Bearer dummy" {
 			t.Errorf("Authorization 错误: %q", got)
 		}
 		resp := map[string]any{
@@ -48,7 +50,7 @@ func TestCritiqueParsesGoodAdvice(t *testing.T) {
 	srv := fakeChat(t, `{"good": true, "score": 90, "problem": "无", "direction": "none", "step": 0.1}`, "")
 	defer srv.Close()
 
-	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"))
+	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"), judge.Placement{})
 	if adv.Fallback {
 		t.Fatalf("不该回退: %v", adv.Err)
 	}
@@ -67,7 +69,7 @@ func TestCritiqueParsesBiggerAdvice(t *testing.T) {
 	srv := fakeChat(t, `{"good": false, "score": 60, "problem": "图案偏小", "direction": "bigger", "step": 0.2}`, "")
 	defer srv.Close()
 
-	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"))
+	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"), judge.Placement{})
 	if adv.Fallback {
 		t.Fatalf("不该回退: %v", adv.Err)
 	}
@@ -90,7 +92,7 @@ func TestCritiqueFallsBackToReasoningContent(t *testing.T) {
 	srv := fakeChat(t, "", `结论：{"good": false, "score": 55, "problem": "压摄像头", "direction": "avoid_cam", "step": 0.15}`)
 	defer srv.Close()
 
-	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"))
+	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"), judge.Placement{})
 	if adv.Fallback {
 		t.Fatalf("不该回退: %v", adv.Err)
 	}
@@ -102,17 +104,17 @@ func TestCritiqueFallsBackToReasoningContent(t *testing.T) {
 	}
 }
 
-// 模型输出完全无法识别时必须回退成「已够好」，不能返回错误让整批中断。
+// 模型输出无法识别时结束微调，但不能冒充质量合格。
 func TestCritiqueGarbageFallsBack(t *testing.T) {
 	srv := fakeChat(t, "我觉得还行吧", "")
 	defer srv.Close()
 
-	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"))
+	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"), judge.Placement{})
 	if !adv.Fallback {
 		t.Error("垃圾输出应该回退")
 	}
-	if !adv.Good {
-		t.Error("回退时应该认为已够好，避免空转")
+	if adv.Good {
+		t.Error("失败评审不得标记合格")
 	}
 	if adv.Err == nil {
 		t.Error("回退时应带错误原因")
@@ -125,7 +127,7 @@ func TestCritiqueHTTP500FallsBack(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"))
+	adv := Critique(testCfg(srv.URL), []byte("fakejpeg"), judge.Placement{})
 	if !adv.Fallback {
 		t.Error("HTTP 500 应该回退")
 	}
@@ -135,9 +137,16 @@ func TestCritiqueHTTP500FallsBack(t *testing.T) {
 }
 
 func TestCritiqueEmptyJPEGFallsBack(t *testing.T) {
-	adv := Critique(testCfg("http://127.0.0.1:1"), nil)
+	adv := Critique(testCfg("http://127.0.0.1:1"), nil, judge.Placement{})
 	if !adv.Fallback {
 		t.Error("空图应该回退")
+	}
+}
+
+func TestCritiqueFailureIsUnreviewed(t *testing.T) {
+	adv := Critique(testCfg("http://127.0.0.1:1"), nil, judge.Placement{})
+	if !adv.Fallback || adv.Good {
+		t.Fatalf("failed review must remain unreviewed: %+v", adv)
 	}
 }
 
@@ -152,7 +161,7 @@ func TestCritiqueSendsEnableThinkingFalse(t *testing.T) {
 
 	cfg := testCfg(srv.URL)
 	cfg.Thinking = false
-	Critique(cfg, []byte("fakejpeg"))
+	Critique(cfg, []byte("fakejpeg"), judge.Placement{})
 
 	if v, ok := got["enable_thinking"]; !ok || v != false {
 		t.Errorf("enable_thinking 应为 false，实际 %v", v)
@@ -230,8 +239,8 @@ func TestPlanAvoidCam(t *testing.T) {
 	if sc >= 1.0 {
 		t.Errorf("压摄像头应该缩小，实际 scale=%v", sc)
 	}
-	if oy >= 0 {
-		t.Errorf("重心在下侧时应往上推，实际 offsetY=%v", oy)
+	if oy <= 0 {
+		t.Errorf("避让画布顶部镜头应下移，实际 offsetY=%v", oy)
 	}
 }
 
@@ -282,6 +291,13 @@ func TestParseAdviceInfersGoodFromScore(t *testing.T) {
 	adv := parseAdvice(`{"score": 88, "direction": "none"}`)
 	if !adv.Good {
 		t.Error("score=88 且 direction=none 应推断为 good")
+	}
+}
+
+func TestParseAdvicePreservesExplicitFailure(t *testing.T) {
+	adv := parseAdvice(`{"good":false,"score":88,"problem":"关键文字被遮挡","direction":"none"}`)
+	if adv.Good {
+		t.Fatal("explicit good=false must not be overridden by score")
 	}
 }
 

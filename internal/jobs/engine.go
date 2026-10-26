@@ -108,9 +108,14 @@ const (
 	StateStopping State = "stopping" // 已请求停止，当前组做完就收尾
 )
 
+type photoshop interface {
+	Render(psx.RenderRequest) (string, error)
+	CloseAllDocs() error
+}
+
 // Engine 管理一次运行的完整生命周期。
 type Engine struct {
-	ps     *psx.Session
+	ps     photoshop
 	store  *cfg.Store
 	emitFn func(Event)
 
@@ -149,7 +154,7 @@ type Engine struct {
 var errStopped = fmt.Errorf("已停止")
 
 // New 创建引擎。
-func New(ps *psx.Session, store *cfg.Store, emit func(Event)) *Engine {
+func New(ps photoshop, store *cfg.Store, emit func(Event)) *Engine {
 	e := &Engine{ps: ps, store: store, emitFn: emit, state: StateIdle}
 	e.gcond = sync.NewCond(&e.gmu)
 	e.processFn = (*Engine).processOne
@@ -775,8 +780,7 @@ func (e *Engine) precheckStore() *precheck.Store {
 // 判定顺序：记录库命中 → 模型判定 → 落库。命中时不再调模型，
 // 所以「图案 × 多模板」只会为同一个图案花一次判定成本。
 //
-// 任何异常（读文件失败、缩略图失败、模型失败）都放行：预检只是省时间，
-// 不能因为它让整批任务停摆。
+// 严格预检下，异常会阻止当前组渲染并记录失败，后续组继续执行。
 func (e *Engine) precheckOne(ctx context.Context, def cfg.Config,
 	jc judge.Config, t *Task, seq, total int) bool {
 
@@ -785,6 +789,10 @@ func (e *Engine) precheckOne(ctx context.Context, def cfg.Config,
 	}
 	st, err := os.Stat(t.Pattern)
 	if err != nil {
+		if def.PrecheckSkip {
+			e.failTask(t, fmt.Errorf("预检未完成，未套图: %w", err))
+			return true
+		}
 		e.logf("warn", "  预检跳过（读取文件失败）: %v", err)
 		return false
 	}
@@ -814,13 +822,21 @@ func (e *Engine) precheckOne(ctx context.Context, def cfg.Config,
 
 	dataURL, err := imgutil.ThumbDataURL(t.Pattern, def.ImageMaxSide)
 	if err != nil {
+		if def.PrecheckSkip {
+			e.failTask(t, fmt.Errorf("预检缩略图失败，未套图: %w", err))
+			return true
+		}
 		e.logf("warn", "  [%d/%d] 预检缩略图失败，放行: %v", seq, total, err)
 		return false
 	}
 
 	v := precheck.Check(jc, dataURL)
 	if v.Fallback {
-		// 模型挂了：放行并标注，不落库（下次还要重试）
+		if def.PrecheckSkip {
+			e.failTask(t, fmt.Errorf("预检未确认合格，未套图: %w", v.Err))
+			return true
+		}
+		// 未确认不落库；仅显式关闭跳过时允许带警告继续。
 		e.logf("warn", "  [%d/%d] 预检失败，默认放行: %v", seq, total, v.Err)
 		return false
 	}
@@ -956,6 +972,15 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	//    直到模型说「够了」、调不动、或到达 max_rounds 上限。
 	//    关闭自动判断或 auto_tune_on 时退化为原来的单轮行为。
 	tc := tuner.Config(jc)
+	reviewOn := opt.Auto && def.AutoTuneOn
+	placement := judge.Placement{Fit: opt.Fit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY}
+	if opt.Auto {
+		placement.SourceDataURL, err = imgutil.ThumbDataURL(patPath, def.ImageMaxSide)
+		if err != nil {
+			e.failTask(t, fmt.Errorf("生成原图对照: %w", err))
+			return
+		}
+	}
 	// 轮数优先级：请求里显式给的 maxRounds > 配置里的 max_rounds。
 	// 只有「调模型」才谈得上微调，所以 Auto 关闭时恒为 1 轮。
 	wantRounds := opt.MaxRounds
@@ -963,7 +988,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		wantRounds = def.MaxRounds
 	}
 	rounds := 1
-	if opt.Auto && def.AutoTuneOn && wantRounds > 1 {
+	if reviewOn && wantRounds > 1 {
 		rounds = wantRounds
 		if rounds > 3 {
 			rounds = 3
@@ -976,16 +1001,18 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	// 任何 >1 的档位都会把图案推出壳面被裁掉。宽扁图案（如 945x574）
 	// 尤其明显——1:1 时宽度已顶满，放大就横向丢掉设计元素。
 	if opt.NoCrop && fitIsContainLike(opt.Fit) {
-		if kept := squashScales(scales); len(kept) != len(scales) {
-			e.logf("dim", "  禁止裁切：候选档位等比压入 (0,1] → %v", kept)
-			scales = kept
-		}
+		scales = squashScales(scales)
+		e.logf("dim", "  禁止裁切：实际候选档位 %v", scales)
 	}
 	offX, offY := opt.OffsetX, opt.OffsetY
 	var (
-		flatPick    string        // 最终选中的拼合图
-		chosenScale float64       // 最终填充倍数
-		chosenNote  string        // 最终选档理由
+		flatPick    string  // 最终选中的拼合图
+		chosenScale float64 // 最终填充倍数
+		chosenNote  string  // 最终选档理由
+		reviewGood  bool
+		bestScale   float64
+		bestScore   = -1
+		bestNote    string
 		hist        []tuner.Round // 各轮评审记录，供界面展示
 	)
 
@@ -996,7 +1023,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			if round > 1 {
 				t.Message = fmt.Sprintf("第 %d 轮渲染", round)
 			} else {
-				t.Message = "Photoshop 渲染候选"
+				t.Message = "渲染候选"
 			}
 		})
 
@@ -1026,7 +1053,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			}
 		}
 		if err != nil {
-			e.failTask(t, fmt.Errorf("Photoshop 渲染: %w", err))
+			e.failTask(t, fmt.Errorf("模板渲染: %w", err))
 			return
 		}
 
@@ -1070,7 +1097,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 				idxFlat = append(idxFlat, i)
 			}
 			if len(cands) > 1 {
-				res := judge.Choose(jc, cands, t.PatternName)
+				res := judge.Choose(jc, cands, t.PatternName, placement)
 				if res.Pick >= 0 && res.Pick < len(idxFlat) {
 					pick = idxFlat[res.Pick]
 				}
@@ -1093,8 +1120,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 
 		cur := tuner.Round{Index: round, Scale: chosenScale, OffsetX: offX, OffsetY: offY}
 
-		// 最后一轮不再评审，直接出图
-		if round >= rounds {
+		if !reviewOn {
 			hist = append(hist, cur)
 			break
 		}
@@ -1112,14 +1138,29 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			hist = append(hist, cur)
 			break
 		}
-		adv := tuner.Critique(tc, jpg)
+		placement.Scale, placement.OffsetX, placement.OffsetY = chosenScale, offX, offY
+		adv := tuner.Critique(tc, jpg, placement)
+		reviewGood = adv.Good && !adv.Fallback
 		cur.Score = adv.Score
 		cur.Problem = adv.Problem
 		cur.Good = adv.Good
 		hist = append(hist, cur)
 
 		if adv.Fallback {
+			chosenNote = "评审未完成，请人工复核"
 			e.logf("warn", "  评审模型调用失败，结束微调: %v", adv.Err)
+			break
+		}
+		chosenNote = fmt.Sprintf("评审 %d 分：%s", adv.Score, adv.Problem)
+		if adv.Score > bestScore {
+			if err := copyFile(flatPick, filepath.Join(tmp, "best.png")); err != nil {
+				e.failTask(t, fmt.Errorf("保存评审候选: %w", err))
+				return
+			}
+			bestScale, bestScore, bestNote = chosenScale, adv.Score, chosenNote
+		}
+		if round >= rounds {
+			e.logf("info", "  最终评审 %d 分：%s（合格=%t）", adv.Score, adv.Problem, reviewGood)
 			break
 		}
 		nextScale, nx, ny, iterate := tuner.Plan(adv, chosenScale, offX, offY)
@@ -1136,12 +1177,21 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			e.logf("info", "  禁止裁切：x%.2f 超出完整放下上限，压回 x1.00", nextScale)
 			nextScale = 1
 		}
+		if nextScale == chosenScale && nx == offX && ny == offY {
+			e.logf("info", "  已到参数约束，结束无变化的重复渲染")
+			break
+		}
 
 		// 下一轮只渲这一档，省 PS 与模型额度
 		scales = []float64{nextScale}
 		offX, offY = nx, ny
 	}
 
+	if reviewOn && !reviewGood && bestScore >= 0 {
+		flatPick = filepath.Join(tmp, "best.png")
+		chosenScale, chosenNote = bestScale, bestNote+"；保留较佳候选，请人工复核"
+		e.logf("warn", "  使用已评审较佳候选 x%.3f（%d 分），仍需人工复核", bestScale, bestScore)
+	}
 	// 5) 切格导出
 	e.updateTask(t, func(t *Task) {
 		t.Phase = PhaseExport
@@ -1166,6 +1216,9 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		t.Phase = PhaseDone
 		t.Progress = 100
 		t.Message = fmt.Sprintf("生成 %d 张", len(files))
+		if reviewOn && !reviewGood {
+			t.Message += "（评审未通过，请人工复核）"
+		}
 		t.Files = files
 		t.OutputDir = outDir
 		if chosenNote != "" {

@@ -18,17 +18,27 @@ import (
 	"titao/internal/genjobs"
 	"titao/internal/imgutil"
 	"titao/internal/jobs"
+	"titao/internal/photocraft"
 	"titao/internal/psx"
 	"titao/internal/updater"
 )
 
 // App 是绑定到前端的门面。
+type editorSession interface {
+	Render(psx.RenderRequest) (string, error)
+	CloseAllDocs() error
+	Probe() (string, error)
+	ProbeTemplate(string) (*psx.TemplateInfo, error)
+	Close() error
+}
+
 type App struct {
-	ctx   context.Context
-	store *cfg.Store
-	ps    *psx.Session
-	eng   *jobs.Engine
-	gen   *genjobs.Engine
+	ctx        context.Context
+	store      *cfg.Store
+	ps         editorSession
+	editorName string
+	eng        *jobs.Engine
+	gen        *genjobs.Engine
 
 	mu       sync.Mutex
 	psStatus PSStatus
@@ -36,6 +46,8 @@ type App struct {
 
 // PSStatus 是 Photoshop 连接状态。
 type PSStatus struct {
+	Pending   bool   `json:"pending"`
+	Engine    string `json:"engine"`
 	Available bool   `json:"available"`
 	Version   string `json:"version"`
 	Error     string `json:"error"`
@@ -58,7 +70,15 @@ func (a *App) startup(ctx context.Context) {
 	}
 	a.store = store
 
-	a.ps = psx.Open()
+	c := cfg.Default()
+	if store != nil {
+		c = store.Get()
+	}
+	a.editorName = "Photoshop"
+	if c.Renderer == "photocraft" {
+		a.editorName = "PhotoCraft"
+	}
+	a.ps = &lazyEditor{open: func() (editorSession, string, error) { return newRenderer(c) }}
 	a.eng = jobs.New(a.ps, store, func(ev jobs.Event) {
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "titao:event", ev)
@@ -72,6 +92,17 @@ func (a *App) startup(ctx context.Context) {
 
 	// 启动时后台探测 Photoshop，不阻塞界面
 	go a.checkPS()
+}
+
+func newRenderer(c cfg.Config) (editorSession, string, error) {
+	switch c.Renderer {
+	case "photocraft":
+		return photocraft.New(c.PhotoCraftCLI), "PhotoCraft", nil
+	case "", "photoshop":
+		return psx.Open(), "Photoshop", nil
+	default:
+		return nil, c.Renderer, fmt.Errorf("未知套图引擎 %q", c.Renderer)
+	}
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -109,14 +140,15 @@ func (a *App) CheckPhotoshop() PSStatus {
 }
 
 func (a *App) checkPS() {
-	st := PSStatus{Checked: true}
+	st := PSStatus{Checked: true, Engine: a.editorName}
 	if a.ps == nil {
-		st.Error = "Photoshop 会话未初始化"
+		st.Error = "套图引擎未初始化"
 	} else if ver, err := a.ps.Probe(); err != nil {
 		st.Error = err.Error()
 	} else {
 		st.Available = true
 		st.Version = ver
+		st.Pending = ver == ""
 	}
 	a.mu.Lock()
 	a.psStatus = st
@@ -138,6 +170,9 @@ func (a *App) GetConfig() (map[string]any, error) {
 func (a *App) SaveConfig(c cfg.Config) (cfg.Config, error) {
 	if a.store == nil {
 		return cfg.Config{}, fmt.Errorf("配置未加载")
+	}
+	if c.Renderer != "" && c.Renderer != "photoshop" && c.Renderer != "photocraft" {
+		return cfg.Config{}, fmt.Errorf("未知套图引擎 %q", c.Renderer)
 	}
 	return a.store.Update(func(cur *cfg.Config) {
 		*cur = c
@@ -234,7 +269,7 @@ type FileEntry struct {
 // ProbeTemplate 读取模板结构（尺寸、参考线、图层、可套图的图层组）。
 func (a *App) ProbeTemplate(templatePath string) (*psx.TemplateInfo, error) {
 	if a.ps == nil {
-		return nil, fmt.Errorf("Photoshop 会话未初始化")
+		return nil, fmt.Errorf("套图引擎未初始化")
 	}
 	tmp, err := os.MkdirTemp("", "probe_")
 	if err != nil {
@@ -271,7 +306,7 @@ func (a *App) StartRun(opt jobs.Options) error {
 	a.mu.Unlock()
 	if !st.Available {
 		go a.checkPS()
-		return fmt.Errorf("Photoshop 未就绪：%s", firstNonEmpty(st.Error, "请先启动 Photoshop 一次"))
+		return fmt.Errorf("%s 未就绪：%s", firstNonEmpty(st.Engine, "套图引擎"), firstNonEmpty(st.Error, "请先检测套图引擎"))
 	}
 	return a.eng.Start(opt)
 }
@@ -577,15 +612,16 @@ func (a *App) GenModes() []map[string]string {
 
 // UpdateInfo 是一次更新检查的结果。
 type UpdateInfo struct {
-	Checked bool   `json:"checked"`
-	HasNew  bool   `json:"hasNew"`
-	Current string `json:"current"`
-	Latest  string `json:"latest"`
-	Notes   string `json:"notes"`
-	URL     string `json:"url"`   // release 页面
-	Asset   string `json:"asset"` // 可执行文件下载地址（可能为空）
-	Size    int64  `json:"size"`  // 资产字节数
-	Error   string `json:"error"` // 检查失败原因（静默用，不弹窗）
+	Checksum string `json:"checksum"`
+	Checked  bool   `json:"checked"`
+	HasNew   bool   `json:"hasNew"`
+	Current  string `json:"current"`
+	Latest   string `json:"latest"`
+	Notes    string `json:"notes"`
+	URL      string `json:"url"`   // release 页面
+	Asset    string `json:"asset"` // 可执行文件下载地址（可能为空）
+	Size     int64  `json:"size"`  // 资产字节数
+	Error    string `json:"error"` // 检查失败原因（静默用，不弹窗）
 }
 
 // CheckUpdate 查一次 GitHub 最新 release。
@@ -614,6 +650,9 @@ func (a *App) CheckUpdate() UpdateInfo {
 	if as := rel.AssetSuffix(".exe"); as != nil {
 		info.Asset = as.BrowserDownloadURL
 		info.Size = as.Size
+		if sum := rel.AssetByName(as.Name + ".sha256"); sum != nil {
+			info.Checksum = sum.BrowserDownloadURL
+		}
 	}
 	return info
 }
@@ -623,6 +662,9 @@ func (a *App) CheckUpdate() UpdateInfo {
 // 流程：下载到临时目录 → 校验大小 → 写一个延迟替换脚本 → 提示用户重启。
 // exe 运行中不能覆盖自身，所以真正的替换由脚本在进程退出后完成。
 func (a *App) InstallUpdate() (string, error) {
+	if (a.eng != nil && a.eng.IsRunning()) || (a.gen != nil && a.gen.IsRunning()) {
+		return "", fmt.Errorf("请先完成或停止当前任务，再下载更新")
+	}
 	info := a.CheckUpdate()
 	if !info.HasNew {
 		if info.Error != "" {
@@ -633,15 +675,24 @@ func (a *App) InstallUpdate() (string, error) {
 	if info.Asset == "" {
 		return "", fmt.Errorf("最新版本 %s 没有提供可下载的 exe，请到 %s 手动下载", info.Latest, info.URL)
 	}
+	if info.Checksum == "" {
+		return "", fmt.Errorf("新版缺少 SHA256 校验文件，请到发布页手动下载")
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("定位当前程序: %w", err)
 	}
-	tmpDir := filepath.Join(os.TempDir(), "titao-update")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+	tmpDir, err := os.MkdirTemp(filepath.Dir(exe), ".titao-update-")
+	if err != nil {
 		return "", fmt.Errorf("创建临时目录: %w", err)
 	}
+	staged := false
+	defer func() {
+		if !staged {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
 	newExe := filepath.Join(tmpDir, "titao-new.exe")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -654,9 +705,24 @@ func (a *App) InstallUpdate() (string, error) {
 	} else if info.Size > 0 && st.Size() != info.Size {
 		return "", fmt.Errorf("下载不完整：期望 %d 字节，实际 %d 字节", info.Size, st.Size())
 	}
+	sumPath := filepath.Join(tmpDir, "new.sha256")
+	if err := updater.Download(ctx, info.Checksum, sumPath); err != nil {
+		return "", fmt.Errorf("下载校验文件: %w", err)
+	}
+	sum, err := os.ReadFile(sumPath)
+	if err != nil {
+		return "", err
+	}
+	if err := updater.VerifySHA256(newExe, string(sum)); err != nil {
+		return "", err
+	}
+	if err := os.Remove(sumPath); err != nil {
+		return "", err
+	}
 	if err := updater.ApplyReplace(exe, newExe); err != nil {
 		return "", fmt.Errorf("安排替换: %w", err)
 	}
+	staged = true
 	return fmt.Sprintf("已下载 %s，替换脚本已就绪。关闭程序后会自动替换，重新打开即为新版本。", info.Latest), nil
 }
 
@@ -665,6 +731,9 @@ func (a *App) AppVersion() string { return Version }
 
 // PSCaps 返回当前 Photoshop 的能力诊断（版本自适应结果）。
 func (a *App) PSCaps() map[string]any {
+	if a.editorName == "PhotoCraft" {
+		return map[string]any{"version": a.CheckPhotoshop().Version, "summary": "本机 PhotoCraft 无界面引擎，保留智能对象变换与遮挡；不使用 Photoshop COM。", "notes": []string{"在设置中配置 photocraft-cli.exe；切换引擎需保存后重启工作台。"}}
+	}
 	a.mu.Lock()
 	ver := a.psStatus.Version
 	a.mu.Unlock()

@@ -9,6 +9,34 @@ import (
 	"time"
 )
 
+func TestModelReviewDefaults(t *testing.T) {
+	c := Default()
+	if c.ImageMaxSide != 800 || c.MaxRounds != 3 {
+		t.Fatalf("model review defaults: preview=%d rounds=%d", c.ImageMaxSide, c.MaxRounds)
+	}
+}
+
+func TestRendererSelectionSurvivesReload(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Get().Renderer != "photoshop" {
+		t.Fatal("legacy default must remain Photoshop")
+	}
+	if _, err = s.Update(func(c *Config) { c.Renderer = "photocraft"; c.PhotoCraftCLI = "custom/photocraft-cli.exe" }); err != nil {
+		t.Fatal(err)
+	}
+	s, err = NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := s.Get(); c.Renderer != "photocraft" || c.PhotoCraftCLI != "custom/photocraft-cli.exe" {
+		t.Fatal("renderer configuration lost")
+	}
+}
+
 // TestUpdateDoesNotDeadlock 复现并守住「保存配置」死锁：
 // 旧实现持写锁后调 Get()（内部 RLock），sync.RWMutex 不可重入 → 永久卡死。
 func TestUpdateDoesNotDeadlock(t *testing.T) {

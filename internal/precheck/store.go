@@ -11,18 +11,22 @@ import (
 	"time"
 )
 
+// PolicyVersion invalidates decisions made by the previous permissive classifier.
+const PolicyVersion = 2
+
 // Record 是记录库里的一行。
 //
 // 命中判据是 Path + Size + MTimeUnix 三者全同：只要用户替换了同名文件，
 // size 或 mtime 必然变，就会重新判定。
 type Record struct {
-	Path   string   `json:"path"`
-	Size   int64    `json:"size"`
-	MTime  int64    `json:"mtime"` // unix 秒
-	OK     bool     `json:"ok"`
-	Reason string   `json:"reason"`
-	Tags   []string `json:"tags"`
-	At     string   `json:"at"` // RFC3339
+	PolicyVersion int      `json:"policy_version"`
+	Path          string   `json:"path"`
+	Size          int64    `json:"size"`
+	MTime         int64    `json:"mtime"` // unix 秒
+	OK            bool     `json:"ok"`
+	Reason        string   `json:"reason"`
+	Tags          []string `json:"tags"`
+	At            string   `json:"at"` // RFC3339
 }
 
 // Store 是 precheck.jsonl 记录库。启动时一次性读入内存 map，
@@ -61,7 +65,7 @@ func NewStore(path string) (*Store, error) {
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			continue // 坏行跳过
 		}
-		if r.Path == "" {
+		if r.Path == "" || r.PolicyVersion != PolicyVersion {
 			continue
 		}
 		s.idx[keyOf(r.Path, r.Size, r.MTime)] = r
@@ -90,6 +94,9 @@ func (s *Store) Lookup(path string, size, mtime int64) (Record, bool) {
 //
 // 写盘失败不影响判定结果（内存索引已经更新），但要如实返回错误让上层记警告。
 func (s *Store) Append(r Record) error {
+	if r.PolicyVersion == 0 {
+		r.PolicyVersion = PolicyVersion
+	}
 	if r.At == "" {
 		r.At = time.Now().Format(time.RFC3339)
 	}

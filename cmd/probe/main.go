@@ -15,6 +15,7 @@ import (
 
 	"titao/internal/cfg"
 	"titao/internal/jobs"
+	"titao/internal/photocraft"
 	"titao/internal/psx"
 )
 
@@ -78,11 +79,21 @@ func run(args []string) error {
 	c := store.Get()
 	fmt.Printf("cfg: model=%s candidates=%v fit=%s\n", c.Model, c.Candidates, c.Fit)
 
-	ps := psx.Open()
+	var ps interface {
+		Render(psx.RenderRequest) (string, error)
+		CloseAllDocs() error
+		Probe() (string, error)
+		Close() error
+	}
+	if c.Renderer == "photocraft" {
+		ps = photocraft.New(c.PhotoCraftCLI)
+	} else {
+		ps = psx.Open()
+	}
 	defer ps.Close()
 
 	ver, err := ps.Probe()
-	fmt.Printf("PS: version=%q err=%v\n", ver, err)
+	fmt.Printf("%s: version=%q err=%v\n", c.Renderer, ver, err)
 	if err != nil {
 		return err
 	}

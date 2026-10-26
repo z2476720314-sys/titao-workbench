@@ -359,6 +359,19 @@ func TestBuildReplaceScript(t *testing.T) {
 	}
 }
 
+func TestUpdateWaitsForExitAndDoesNotTargetConfig(t *testing.T) {
+	s := BuildReplaceScript(`E:\app\workbench.exe`, `E:\app\.update\new.exe`)
+	if !strings.Contains(s, "Wait-Process -Id") {
+		t.Fatal("update must wait for running app to exit")
+	}
+	if strings.Contains(strings.ToLower(s), "config.json") {
+		t.Fatal("updater must not overwrite config")
+	}
+	if strings.Index(s, "Wait-Process") > strings.Index(s, "copy /y") {
+		t.Fatal("replacement starts before exit")
+	}
+}
+
 // TestApplyReplaceMissingNewExe 守住更新包不存在时提前报错，不生成脚本。
 func TestApplyReplaceMissingNewExe(t *testing.T) {
 	dir := t.TempDir()

@@ -31,6 +31,22 @@ type Config struct {
 	Thinking     bool
 }
 
+// Placement 把实际渲染约束与原图一起交给选档和评审。
+type Placement struct {
+	SourceDataURL           string
+	Fit                     string
+	NoCrop                  bool
+	Scale, OffsetX, OffsetY float64
+}
+
+func (p Placement) Description() string {
+	scale := "各候选的实际 scale 见编号表"
+	if p.Scale > 0 {
+		scale = fmt.Sprintf("scale=%.3f", p.Scale)
+	}
+	return fmt.Sprintf("实际参数：fit=%s，no_crop=%t，%s，offset_x=%.3f，offset_y=%.3f。scale=1 是当前适配模式的基准，正 x 向右、正 y 向下；位移按图案原始画布方向判断。no_crop=true 时不许为减少留白裁掉主体，优先在完整保留图案的前提下贴合底部与左右。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY)
+}
+
 // Candidate 是一个候选。
 type Candidate struct {
 	// JPEG 是第一格的预览图字节。
@@ -58,12 +74,12 @@ const promptTemplate = `你是手机壳商品图评审。这是同一个图案�
 %s
 
 按下面的标准挑出最好的一张：
-1. 优先看「饱满度」：图案要尽量撑满壳面，留白越少越好。留白多会显得空、廉价，这是最常见的扣分项。
-2. 图案主体不能被摄像头模组压住。
-3. 只有在图案已经明显超出壳边、被裁掉可见部分时才算不合格；轻微贴边是可以接受的，宁可贴边也不要小。
-4. 图案在壳面上的重心要居中舒服，不要一边倒。
-5. 注意：图案是印在壳的背面平面上的，判断时看「图案 vs 整个壳面」的比例，不要被拍摄角度误导。
-6. 若几张都不理想，选最接近「刚好撑满且未被裁切」的那张。
+1. 对照原图案保护主体、比例、方向、透明区域与细节。原图透明区域用白底预览，不代表要在壳上印白色矩形。原图已有的平直底边不应悬在壳面中间形成贴纸截边。
+2. 在满足实际不裁切约束的候选中，优先选大小饱满、底部贴合、左右平衡的图，不要无理由缩小。
+3. 摄像头、边框、手指自然遮挡背景装饰是正常实物关系，不要为了躲开整个镜头区域把整幅图缩小。关键人物脸部或文字被镜头遮挡才需避让。
+4. 透明孔洞露出壳色、壳体边框、相机开孔与拍摄透视不是图案缺失，不要求图案覆盖这些区域。
+5. 原图应跟随壳的方向旋转，不得镜像或拉伸；按印刷背板判断，保留原壳面材质与光影。
+6. 若几张都不理想，选择最接近以上要求的一张，在 reason 说明仍有的问题，不能声称全部合格。
 
 只输出一行 JSON，不要任何解释：
 {"pick": <编号>, "reason": "<15字内>"}`
@@ -78,7 +94,7 @@ var (
 //
 // 网络或解析失败时不返回错误，而是回退到中间偏小的档位并置 Fallback，
 // 保证整批套图不中断。
-func Choose(cfg Config, cands []Candidate, patternName string) Result {
+func Choose(cfg Config, cands []Candidate, patternName string, placement Placement) Result {
 	if len(cands) == 0 {
 		return Result{Pick: 0, Fallback: true, Err: fmt.Errorf("没有候选")}
 	}
@@ -91,9 +107,16 @@ func Choose(cfg Config, cands []Candidate, patternName string) Result {
 		legend[i] = fmt.Sprintf("  第 %d 张：基准的 %.0f%%", i+1, c.Scale*100)
 	}
 	text := fmt.Sprintf(promptTemplate, len(cands), len(cands), strings.Join(legend, "\n"))
+	text += "\n" + placement.Description()
+	if placement.SourceDataURL != "" {
+		text += "\n第一张附图是原图案参考，其后的图片依次对应候选编号 1、2……，原图不参与编号。"
+	}
 
 	content := make([]any, 0, len(cands)+1)
 	content = append(content, map[string]any{"type": "text", "text": text})
+	if placement.SourceDataURL != "" {
+		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": placement.SourceDataURL}})
+	}
 	for _, c := range cands {
 		content = append(content, map[string]any{
 			"type": "image_url",
@@ -109,8 +132,9 @@ func Choose(cfg Config, cands []Candidate, patternName string) Result {
 		"max_tokens":  cfg.MaxTokens,
 		"temperature": cfg.Temperature,
 	}
-	if !cfg.Thinking {
-		body["enable_thinking"] = false
+	ApplyThinking(body, cfg.Model, cfg.Thinking)
+	if strings.HasPrefix(strings.ToLower(cfg.Model), "deepseek") {
+		body["response_format"] = map[string]string{"type": "json_object"}
 	}
 
 	payload, err := json.Marshal(body)

@@ -31,13 +31,15 @@ const PREVIEW_URL = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
 const mockKey = FRESH ? '' : 'dummy'
 
 const CONFIG = {
+  renderer: FRESH ? 'photoshop' : 'photocraft',
+  photocraft_cli: '',
   base_url: 'https://example.invalid/v1',
   api_key: mockKey,
   model: 'demo-vision-model',
   max_tokens: 4000,
   timeout_seconds: 180,
   temperature: 0.1,
-  image_max_side: 640,
+  image_max_side: 800,
   thinking: false,
   candidates: [0.85, 0.95, 1.05, 1.15, 1.3],
   output_dir: FRESH ? '' : OUT,
@@ -51,7 +53,7 @@ const CONFIG = {
   no_crop: true,
   offset_x: 0,
   offset_y: 0,
-  max_rounds: 2,
+  max_rounds: 3,
   auto_tune_on: true,
   precheck_on: true,
   precheck_skip: true,
@@ -202,8 +204,8 @@ const handlers: Record<string, (...a: any[]) => any> = {
   GetConfig: () => ({ config: structuredClone(CONFIG), path: 'demo/config.json' }),
   SaveConfig: (c: any) => { Object.assign(CONFIG, c); return structuredClone(CONFIG) },
   OpenConfigFile: () => null,
-  CheckPhotoshop: () => ({ available: true, version: '27.7.0', error: '', checked: true }),
-  AppVersion: () => '0.3.2',
+  CheckPhotoshop: () => ({ available: true, pending: FRESH, engine: CONFIG.renderer === 'photocraft' ? 'PhotoCraft' : 'Photoshop', version: FRESH ? '' : CONFIG.renderer === 'photocraft' ? '0.16.0' : '27.7.0', error: '', checked: true }),
+  AppVersion: () => '0.3.4',
   PSCaps: () => ({
     version: '27.7.0', major: 27, verified: true,
     doJavaScript: true, noDialogs: true, editSmartObject: true, replaceContents: false,

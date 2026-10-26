@@ -105,7 +105,7 @@ func TestReportsFailuresAndPreservesRecords(t *testing.T) {
 			before, _ := os.ReadFile(path)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"ok\":true,\"reason\":\"clean\",\"tags\":[]}"}}]}`))
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"watermark\":false,\"lens\":false,\"case_edge\":false,\"case_photo\":false,\"reason\":\"clean\"}"}}]}`))
 			}))
 			defer srv.Close()
 			c := cfg.Default()

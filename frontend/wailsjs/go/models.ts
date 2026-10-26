@@ -1,6 +1,8 @@
 export namespace cfg {
 	
 	export class Config {
+	    renderer: string;
+	    photocraft_cli: string;
 	    base_url: string;
 	    api_key: string;
 	    model: string;
@@ -42,8 +44,10 @@ export namespace cfg {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.renderer = source["renderer"];
+	        this.photocraft_cli = source["photocraft_cli"];
 	        this.base_url = source["base_url"];
-	        this.api_key = source["api_key"];
+	        this.api_key = source.api_key;
 	        this.model = source["model"];
 	        this.max_tokens = source["max_tokens"];
 	        this.timeout_seconds = source["timeout_seconds"];
@@ -67,7 +71,7 @@ export namespace cfg {
 	        this.precheck_on = source["precheck_on"];
 	        this.precheck_skip = source["precheck_skip"];
 	        this.gen_base_url = source["gen_base_url"];
-	        this.gen_api_key = source["gen_api_key"];
+	        this.gen_api_key = source.gen_api_key;
 	        this.gen_model = source["gen_model"];
 	        this.gen_size = source["gen_size"];
 	        this.gen_thinking = source["gen_thinking"];
@@ -240,6 +244,9 @@ export namespace jobs {
 	    error?: string;
 	    chosen_scale?: number;
 	    elapsed_ms?: number;
+	    message?: string;
+	    judge_note?: string;
+	    tune_rounds?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new QueueTask(source);
@@ -257,6 +264,9 @@ export namespace jobs {
 	        this.error = source["error"];
 	        this.chosen_scale = source["chosen_scale"];
 	        this.elapsed_ms = source["elapsed_ms"];
+	        this.message = source["message"];
+	        this.judge_note = source["judge_note"];
+	        this.tune_rounds = source["tune_rounds"];
 	    }
 	}
 	export class Queue {
@@ -382,6 +392,8 @@ export namespace main {
 	    }
 	}
 	export class PSStatus {
+	    pending: boolean;
+	    engine: string;
 	    available: boolean;
 	    version: string;
 	    error: string;
@@ -393,6 +405,8 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pending = source["pending"];
+	        this.engine = source["engine"];
 	        this.available = source["available"];
 	        this.version = source["version"];
 	        this.error = source["error"];
@@ -400,6 +414,7 @@ export namespace main {
 	    }
 	}
 	export class UpdateInfo {
+	    checksum: string;
 	    checked: boolean;
 	    hasNew: boolean;
 	    current: string;
@@ -416,6 +431,7 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.checksum = source["checksum"];
 	        this.checked = source["checked"];
 	        this.hasNew = source["hasNew"];
 	        this.current = source["current"];

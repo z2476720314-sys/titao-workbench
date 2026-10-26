@@ -49,7 +49,7 @@ func respWith(content, reasoning string) string {
 
 // TestParseRejectsWatermark 守住不合格判定的完整解析（ok/reason/tags）。
 func TestParseRejectsWatermark(t *testing.T) {
-	v := Parse(`{"ok": false, "reason": "带 shuiyin 水印", "tags": ["watermark"]}`, "")
+	v := Parse(`{"watermark":true,"lens":false,"case_edge":false,"case_photo":false,"reason":"带 shuiyin 水印"}`, "")
 	if v.OK {
 		t.Fatal("应判不合格")
 	}
@@ -66,7 +66,7 @@ func TestParseRejectsWatermark(t *testing.T) {
 
 // TestParseAcceptsClean 守住合格判定。
 func TestParseAcceptsClean(t *testing.T) {
-	v := Parse(`{"ok": true, "reason": "纯图案无水印", "tags": []}`, "")
+	v := Parse(`{"watermark":false,"lens":false,"case_edge":false,"case_photo":false,"reason":"纯图案无水印"}`, "")
 	if !v.OK {
 		t.Fatal("应判合格")
 	}
@@ -77,7 +77,7 @@ func TestParseAcceptsClean(t *testing.T) {
 
 // TestParseReadsReasoningContent 守住「content 空、结论只在 reasoning_content」这个坑。
 func TestParseReadsReasoningContent(t *testing.T) {
-	v := Parse("\n"+`我看了图，{"ok": false, "reason": "有镜头框", "tags": ["lens"]}`, "")
+	v := Parse("\n"+`我看了图，{"watermark":false,"lens":true,"case_edge":false,"case_photo":false,"reason":"有镜头框"}`, "")
 	if v.OK {
 		t.Fatal("应判不合格")
 	}
@@ -91,28 +91,28 @@ func TestParseReadsReasoningContent(t *testing.T) {
 
 // TestParseMultiTags 守住多标签。
 func TestParseMultiTags(t *testing.T) {
-	v := Parse(`{"ok": false, "reason": "壳边框+水印", "tags": ["case-edge", "watermark"]}`, "")
+	v := Parse(`{"watermark":true,"lens":false,"case_edge":true,"case_photo":false,"reason":"壳边框+水印"}`, "")
 	if len(v.Tags) != 2 {
 		t.Fatalf("Tags = %v，期望 2 个", v.Tags)
 	}
-	if v.Tags[0] != TagCaseEdge || v.Tags[1] != TagWatermark {
+	if v.Tags[0] != TagWatermark || v.Tags[1] != TagCaseEdge {
 		t.Errorf("Tags = %v", v.Tags)
 	}
 }
 
-// TestParseFiltersUnknownTags 守住未知 tag 被丢弃、不合格时补 unknown。
-func TestParseFiltersUnknownTags(t *testing.T) {
-	v := Parse(`{"ok": false, "reason": "怪东西", "tags": ["blurry", "雾"]}`, "")
-	if len(v.Tags) != 1 || v.Tags[0] != TagUnknown {
-		t.Errorf("Tags = %v，期望 [unknown]", v.Tags)
+// Wrong flag types must remain unconfirmed.
+func TestParseRejectsWrongFlagType(t *testing.T) {
+	v := Parse(`{"watermark":false,"lens":"false","case_edge":false,"case_photo":false,"reason":"无"}`, "")
+	if v.OK || !v.Fallback {
+		t.Fatalf("invalid checklist passed: %+v", v)
 	}
 }
 
-// TestParseFallbackOnGarbage 守住无法解析时默认放行。
+// TestParseFallbackOnGarbage 守住无法解析时保持未确认。
 func TestParseFallbackOnGarbage(t *testing.T) {
 	v := Parse("这张图看起来还行吧。", "")
-	if !v.OK {
-		t.Error("无法解析时必须默认放行")
+	if v.OK {
+		t.Error("无法解析时不能视为合格")
 	}
 	if !v.Fallback {
 		t.Error("应标 Fallback")
@@ -129,7 +129,7 @@ func TestCheckSendsDisableThinking(t *testing.T) {
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
-		fmt.Fprint(w, respWith(`{"ok": true, "reason": "干净", "tags": []}`, ""))
+		fmt.Fprint(w, respWith(`{"watermark":false,"lens":false,"case_edge":false,"case_photo":false,"reason":"干净"}`, ""))
 	}))
 	defer srv.Close()
 
@@ -146,7 +146,7 @@ func TestCheckSendsOneImage(t *testing.T) {
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
-		fmt.Fprint(w, respWith(`{"ok": true}`, ""))
+		fmt.Fprint(w, respWith(`{"watermark":false,"lens":false,"case_edge":false,"case_photo":false,"reason":"干净"}`, ""))
 	}))
 	defer srv.Close()
 
@@ -164,39 +164,39 @@ func TestCheckSendsOneImage(t *testing.T) {
 	}
 }
 
-// TestCheckHTTPErrorPasses 守住模型失败默认放行（不能因为接口挂了就不套图）。
-func TestCheckHTTPErrorPasses(t *testing.T) {
+// TestCheckHTTPErrorIsUnconfirmed 守住模型失败必须保留未确认状态。
+func TestCheckHTTPErrorIsUnconfirmed(t *testing.T) {
 	srv := serve(t, 500, `{"error":"boom"}`)
 	v := Check(cfgFor(srv), "data:image/jpeg;base64,AAA")
-	if !v.OK {
-		t.Error("HTTP 500 时必须默认放行")
+	if v.OK {
+		t.Error("HTTP 500 时不能视为合格")
 	}
 	if !v.Fallback || v.Err == nil {
 		t.Errorf("应标 Fallback 并带 Err，得到 Fallback=%v Err=%v", v.Fallback, v.Err)
 	}
 }
 
-// TestCheckNetworkErrorPasses 守住连不上也放行。
-func TestCheckNetworkErrorPasses(t *testing.T) {
+// TestCheckNetworkErrorIsUnconfirmed 守住连不上保留未确认状态。
+func TestCheckNetworkErrorIsUnconfirmed(t *testing.T) {
 	cfg := Config{BaseURL: "http://127.0.0.1:1", APIKey: "k", Model: "m",
 		MaxTokens: 10, Timeout: 2 * time.Second}
 	v := Check(cfg, "data:image/jpeg;base64,AAA")
-	if !v.OK || !v.Fallback {
+	if v.OK || !v.Fallback {
 		t.Errorf("连不上时应放行并标 Fallback，得到 OK=%v Fallback=%v", v.OK, v.Fallback)
 	}
 }
 
-// TestCheckEmptyThumbPasses 守住缩略图为空时放行。
-func TestCheckEmptyThumbPasses(t *testing.T) {
+// TestCheckEmptyThumbIsUnconfirmed 守住缩略图为空保留未确认状态。
+func TestCheckEmptyThumbIsUnconfirmed(t *testing.T) {
 	v := Check(Config{}, "   ")
-	if !v.OK || !v.Fallback {
+	if v.OK || !v.Fallback {
 		t.Errorf("空缩略图应放行，得到 OK=%v Fallback=%v", v.OK, v.Fallback)
 	}
 }
 
 // TestCheckRejectPath 守住端到端不合格链路。
 func TestCheckRejectPath(t *testing.T) {
-	srv := serve(t, 200, respWith(`{"ok": false, "reason": "手机壳实拍", "tags": ["case-photo"]}`, ""))
+	srv := serve(t, 200, respWith(`{"watermark":false,"lens":false,"case_edge":false,"case_photo":true,"reason":"手机壳实拍"}`, ""))
 	v := Check(cfgFor(srv), "data:image/jpeg;base64,AAA")
 	if v.OK {
 		t.Fatal("应判不合格")

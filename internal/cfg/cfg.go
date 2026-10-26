@@ -20,6 +20,8 @@ func DefaultCandidates() []float64 {
 
 // Config 是完整配置。
 type Config struct {
+	Renderer      string `json:"renderer"`
+	PhotoCraftCLI string `json:"photocraft_cli"`
 	// 视觉模型
 	BaseURL      string    `json:"base_url"`
 	APIKey       string    `json:"api_key"`
@@ -51,7 +53,7 @@ type Config struct {
 	OffsetY float64 `json:"offset_y"`
 
 	// 参数自动微调：多轮迭代收敛（模型自行决定候选区间与微调量）
-	MaxRounds  int  `json:"max_rounds"`   // 最大迭代轮数，1~3，默认 2
+	MaxRounds  int  `json:"max_rounds"`   // 最大迭代轮数，1~3，默认 3
 	AutoTuneOn bool `json:"auto_tune_on"` // 是否启用多轮自动微调
 
 	// 套图前预检：识别水印 / 镜头框 / 手机壳实拍图并跳过
@@ -78,12 +80,13 @@ type Config struct {
 // Default 返回一份可用的默认配置。
 func Default() Config {
 	return Config{
+		Renderer:     "photoshop",
 		BaseURL:      "https://www.acctoken.com/v1",
 		Model:        "deepseek-v4.1-flash",
 		MaxTokens:    4000,
 		TimeoutSec:   180,
 		Temperature:  0.1,
-		ImageMaxSide: 640,
+		ImageMaxSide: 800,
 		Thinking:     false,
 		Candidates:   DefaultCandidates(),
 		Group:        "插画",
@@ -93,7 +96,7 @@ func Default() Config {
 		TrimAlpha:    true,
 		NoCrop:       boolPtr(true),
 
-		MaxRounds:  2,
+		MaxRounds:  3,
 		AutoTuneOn: true,
 
 		PrecheckOn:   true,
@@ -216,6 +219,9 @@ func (s *Store) saveLocked() error {
 
 // normalize 兜住明显非法的值，避免下游除零或越界。
 func normalize(c *Config) {
+	if c.Renderer == "" {
+		c.Renderer = "photoshop"
+	}
 	if c.CellSize <= 0 {
 		c.CellSize = 800
 	}
@@ -223,7 +229,7 @@ func normalize(c *Config) {
 		c.JPGQuality = 95
 	}
 	if c.ImageMaxSide < 128 {
-		c.ImageMaxSide = 640
+		c.ImageMaxSide = 800
 	}
 	if c.MaxTokens <= 0 {
 		c.MaxTokens = 4000
@@ -257,9 +263,9 @@ func normalize(c *Config) {
 		c.NoCrop = boolPtr(true)
 	}
 
-	// 多轮迭代：1~3 轮，超范围收回，0 视为未配置用默认 2
+	// 多轮迭代：1~3 轮，超范围收回，0 视为未配置用默认 3
 	if c.MaxRounds <= 0 {
-		c.MaxRounds = 2
+		c.MaxRounds = 3
 	}
 	if c.MaxRounds > 3 {
 		c.MaxRounds = 3

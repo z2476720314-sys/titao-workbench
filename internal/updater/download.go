@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -152,7 +153,7 @@ func FileSHA256(path string) (string, error) {
 // 这里生成一个临时 .bat，用 ping 做延迟（比 timeout 稳，不受重定向输入影响），
 // 循环重试直到能写成功，然后启动新版本并自删。
 //
-// 调用方拿到 error 为 nil 后应尽快退出程序。
+// 调用方在方便时退出程序；替换脚本先等待该进程退出，不强制结束任务。
 func ApplyReplace(exePath, newExe string) error {
 	exePath, err := filepath.Abs(exePath)
 	if err != nil {
@@ -173,10 +174,14 @@ func ApplyReplace(exePath, newExe string) error {
 	}
 
 	// 隐藏窗口启动，不抢用户焦点
-	cmd := exec.Command("cmd.exe", "/c", "start", "", "/min", batPath)
+	// cmd.exe needs its own quoting; Go's standard argv quoting corrupts spaced batch paths.
+	cmd := exec.Command("cmd.exe")
+	cmd.Env = append(os.Environ(), "TITAO_UPDATE_SCRIPT="+batPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CmdLine: `cmd.exe /d /s /c ""%TITAO_UPDATE_SCRIPT%""`}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动更新脚本: %w", err)
 	}
+	go func() { _ = cmd.Wait() }()
 	return nil
 }
 
@@ -185,14 +190,15 @@ func ApplyReplace(exePath, newExe string) error {
 // 单独抽出来是为了能单测：批处理的引号/转义极易写错，
 // 一旦写错就是「更新后程序打不开」这种灾难性后果。
 func BuildReplaceScript(exePath, newExe string) string {
-	exe := exePath
-	newFile := newExe
-	dir := filepath.Dir(exePath)
+	exe := strings.ReplaceAll(exePath, "%", "%%")
+	newFile := strings.ReplaceAll(newExe, "%", "%%")
+	dir := strings.ReplaceAll(filepath.Dir(exePath), "%", "%%")
 
 	var b strings.Builder
 	b.WriteString("@echo off\r\n")
 	b.WriteString("setlocal\r\n")
 	b.WriteString("chcp 65001 >nul 2>&1\r\n")
+	fmt.Fprintf(&b, "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command \"Wait-Process -Id %d -ErrorAction SilentlyContinue\" >nul 2>&1\r\n", os.Getpid())
 	// 等主进程真正退出：最多重试 60 次 × 1 秒
 	b.WriteString("set /a tries=0\r\n")
 	b.WriteString(":wait\r\n")

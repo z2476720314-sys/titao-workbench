@@ -32,7 +32,7 @@ type RenderRequest struct {
 	Fit string
 	// Scales 是各档填充倍数：1.0 = 刚好铺满壳面，<1 留白，>1 超出被裁切。
 	Scales []float64
-	// OffsetX / OffsetY 是相对居中的偏移，占画布宽/高的比例。
+	// OffsetX / OffsetY 占画布宽/高的比例；auto/contain 以贴底为基准，其余居中。
 	OffsetX float64
 	OffsetY float64
 	// OutDir 是拼合图输出目录，脚本会写入 flat_0.png…flat_N.png。
@@ -303,16 +303,23 @@ const jsxRender = `(function(){
               else if (FIT == "cover")   { sx = sy = s1 * T; }
               else                       { sx = sy = s0 * T; }   // auto / contain
               // 不裁切上限：T 超过 1 就必然有方向被壳边裁掉。
-              if (NOCROP && FIT != "stretch" && FIT != "cover" && T > 1) {
+              if (NOCROP && FIT != "stretch" && FIT != "cover" && (sx > s0 || sy > s0)) {
                 sx = sy = s0;
               }
               nl.resize(sx * 100, sy * 100, AnchorPosition.MIDDLECENTER);
 
               var b2 = nl.bounds;
               var OFX = __OFX__, OFY = __OFY__;
+              var nw = b2[2].as("px") - b2[0].as("px"), nh = b2[3].as("px") - b2[1].as("px");
+              var tx = (cw - nw) / 2 + cw * OFX;
+              var ty = ((FIT == "auto" || FIT == "contain" || FIT == "") ? ch - nh : (ch - nh) / 2) + ch * OFY;
+              if (NOCROP && FIT != "stretch" && FIT != "cover") {
+                tx = Math.max(0, Math.min(cw - nw, tx));
+                ty = Math.max(0, Math.min(ch - nh, ty));
+              }
               nl.translate(
-                (cw - (b2[2].as("px") - b2[0].as("px"))) / 2 - b2[0].as("px") + cw * OFX,
-                (ch - (b2[3].as("px") - b2[1].as("px"))) / 2 - b2[1].as("px") + ch * OFY
+                tx - b2[0].as("px"),
+                ty - b2[1].as("px")
               );
               if (si === 0) {
                 log.push("  FIT " + FIT + " 图案 " + pw + "x" + ph + " 壳面 " + cw + "x" + ch +

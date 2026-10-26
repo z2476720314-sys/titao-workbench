@@ -57,7 +57,7 @@ func respWith(content, reasoning string) string {
 // TestChooseParsesJSONPick 守住标准 JSON 输出路径。
 func TestChooseParsesJSONPick(t *testing.T) {
 	srv := serve(t, 200, respWith(`{"pick": 3, "reason": "饱满不压摄像头"}`, ""))
-	r := Choose(cfgFor(srv), cands(5), "图案A")
+	r := Choose(cfgFor(srv), cands(5), "图案A", Placement{})
 	if r.Fallback {
 		t.Fatalf("不该回退: %v", r.Err)
 	}
@@ -72,7 +72,7 @@ func TestChooseParsesJSONPick(t *testing.T) {
 // TestChooseReadsReasoningContent 守住「content 为空、结论只在 reasoning_content 里」这个坑。
 func TestChooseReadsReasoningContent(t *testing.T) {
 	srv := serve(t, 200, respWith("", `我比较了五张，{"pick": 4, "reason": "留白少"}`))
-	r := Choose(cfgFor(srv), cands(5), "图案A")
+	r := Choose(cfgFor(srv), cands(5), "图案A", Placement{})
 	if r.Fallback {
 		t.Fatalf("不该回退: %v", r.Err)
 	}
@@ -84,7 +84,7 @@ func TestChooseReadsReasoningContent(t *testing.T) {
 // TestChooseParsesChinesePick 守住中文兜底解析。
 func TestChooseParsesChinesePick(t *testing.T) {
 	srv := serve(t, 200, respWith("我选第 2 张，因为留白合适。", ""))
-	r := Choose(cfgFor(srv), cands(5), "图案A")
+	r := Choose(cfgFor(srv), cands(5), "图案A", Placement{})
 	if r.Fallback {
 		t.Fatalf("不该回退: %v", r.Err)
 	}
@@ -96,7 +96,7 @@ func TestChooseParsesChinesePick(t *testing.T) {
 // TestChooseFallbackOnOutOfRange 守住越界下标不会让上层 panic。
 func TestChooseFallbackOnOutOfRange(t *testing.T) {
 	srv := serve(t, 200, respWith(`{"pick": 99}`, ""))
-	r := Choose(cfgFor(srv), cands(3), "图案A")
+	r := Choose(cfgFor(srv), cands(3), "图案A", Placement{})
 	if !r.Fallback {
 		t.Fatal("越界下标应回退")
 	}
@@ -108,7 +108,7 @@ func TestChooseFallbackOnOutOfRange(t *testing.T) {
 // TestChooseFallbackOnHTTPError 守住 HTTP 失败时回退而不中断流程。
 func TestChooseFallbackOnHTTPError(t *testing.T) {
 	srv := serve(t, 500, `{"error":"boom"}`)
-	r := Choose(cfgFor(srv), cands(5), "图案A")
+	r := Choose(cfgFor(srv), cands(5), "图案A", Placement{})
 	if !r.Fallback {
 		t.Fatal("HTTP 500 应回退")
 	}
@@ -124,7 +124,7 @@ func TestChooseFallbackOnHTTPError(t *testing.T) {
 // TestChooseFallbackOnGarbage 守住无法解析的输出回退。
 func TestChooseFallbackOnGarbage(t *testing.T) {
 	srv := serve(t, 200, respWith("我不知道该选哪个。", ""))
-	r := Choose(cfgFor(srv), cands(4), "图案A")
+	r := Choose(cfgFor(srv), cands(4), "图案A", Placement{})
 	if !r.Fallback {
 		t.Fatal("无法解析应回退")
 	}
@@ -145,13 +145,20 @@ func TestChooseSendsDisableThinking(t *testing.T) {
 
 	cfg := cfgFor(srv)
 	cfg.Thinking = false
-	Choose(cfg, cands(2), "图案A")
+	cfg.Model = "deepseek-v4.1-flash"
+	Choose(cfg, cands(2), "图案A", Placement{})
 	v, ok := got["enable_thinking"]
 	if !ok {
 		t.Fatal("请求体缺少 enable_thinking")
 	}
 	if v != false {
 		t.Errorf("enable_thinking = %v，期望 false", v)
+	}
+	if got["thinking"] == nil || got["thinking"].(map[string]any)["type"] != "disabled" {
+		t.Error("DeepSeek native thinking toggle missing")
+	}
+	if got["response_format"] == nil || got["response_format"].(map[string]any)["type"] != "json_object" {
+		t.Error("JSON response format missing")
 	}
 }
 
@@ -164,7 +171,7 @@ func TestChooseSendsAllImages(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	Choose(cfgFor(srv), cands(5), "图案A")
+	Choose(cfgFor(srv), cands(5), "图案A", Placement{})
 
 	msgs := got["messages"].([]any)
 	content := msgs[0].(map[string]any)["content"].([]any)

@@ -26,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"titao/internal/judge"
 )
 
 // Config 是视觉模型配置（与 judge.Config 同源）。
@@ -54,7 +56,7 @@ type Advice struct {
 	Step float64 `json:"step"`
 	// Raw 是模型原始输出，便于排查。
 	Raw string `json:"-"`
-	// Fallback 表示模型判定失败，用的是保守兜底（认为已够好，停止迭代）。
+	// Fallback 表示模型判定失败，停止迭代但不视为合格。
 	Fallback bool `json:"-"`
 	// Err 是失败原因（Fallback 为 true 时非空）。
 	Err error `json:"-"`
@@ -77,18 +79,18 @@ const promptTemplate = `你是手机壳商品图评审。下面这一张是「�
 请判断这张图是否已经达到可直接上架的质量，如果没达到，指出下一轮该往哪个方向调参数。
 
 评审标准：
-1. 饱满度：图案要尽量撑满壳面，留白越少越好。留白多会显得空、廉价，这是最常见的扣分项。
-2. 不能压摄像头：图案主体不能被摄像头模组遮住。
-3. 不能被裁切：图案不能被壳边裁掉可见部分；轻微贴边可接受，明显裁掉不合格。
-4. 重心要居中舒服，不要一边倒。
-5. 图案是印在壳的背面平面上的，判断比例时不要被拍摄角度误导。
+1. 对照原图案，检查主体、比例、方向、透明区域与细节。透明区域在原图预览中铺白底，不等于应印白底。原图自身的平直底边若悬在壳面中间，优先判断能否完整保留下移贴底，不要只把它当作正常留白。
+2. 在不裁切约束内尽量饱满，底部贴合、左右平衡。若放大已到不裁切上限，不要反复建议无效放大；比例差异必然留下的空隙允许保留。
+3. 镜头、边框、手指自然遮挡背景装饰是正常的，不能为躲开整个镜头区而把整幅图缩小。关键人物脸部或文字被遮挡才使用 avoid_cam。
+4. 壳体方向倒置时图案也应倒置，不得镜像或非等比拉伸；保持原壳色、几何与光影。
+5. 图案必须贴合印刷背板，不能覆盖镜头、壳边或手指。根据实际 scale、fit 和偏移判断下一步是否能执行。
 
 按下面格式只输出一行 JSON，不要任何解释：
 {"good": true/false, "score": 0-100, "problem": "主要问题10字内，没有就写无", "direction": "none|bigger|smaller|up|down|left|right|avoid_cam", "step": 0.05~0.3}
 
 字段说明：
 - good：这张是否已经够好、可以直接上架。score>=85 时一般填 true。
-- direction：下一轮该往哪调。图案偏小用 bigger，偏大或被裁用 smaller，压摄像头用 avoid_cam，重心偏移用 up/down/left/right。
+- direction：下一轮该往哪调。图案偏小且未到上限用 bigger，偏大或被壳边裁用 smaller，关键主体压摄像头用 avoid_cam，底部留白过多用 down，重心偏移用 up/down/left/right。达到硬约束无法改进时 good=false、direction=none，并在 problem 中说明限制。
 - step：调整幅度，问题明显用 0.2，问题轻微用 0.05。`
 
 var (
@@ -107,22 +109,26 @@ var validDirs = map[string]bool{
 
 // Critique 让视觉模型评审一张成品图（单格 JPEG），返回调整建议。
 //
-// 网络或解析失败时返回「已够好」的兜底结论并置 Fallback，
-// 这样整批套图不会因为评审挂了而反复空转。
-func Critique(cfg Config, jpeg []byte) Advice {
+// 网络或解析失败时停止迭代并置 Fallback，结果仍需人工复核。
+func Critique(cfg Config, jpeg []byte, placement judge.Placement) Advice {
 	if len(jpeg) == 0 {
 		return fallback(fmt.Errorf("没有成品图"))
 	}
 
-	content := []any{
-		map[string]any{"type": "text", "text": promptTemplate},
-		map[string]any{
-			"type": "image_url",
-			"image_url": map[string]any{
-				"url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpeg),
-			},
-		},
+	text := promptTemplate + "\n" + placement.Description()
+	if placement.SourceDataURL != "" {
+		text += "\n第一张附图是原图案参考，第二张才是本轮套图成品，只给成品评分。"
 	}
+	content := []any{map[string]any{"type": "text", "text": text}}
+	if placement.SourceDataURL != "" {
+		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": placement.SourceDataURL}})
+	}
+	content = append(content, map[string]any{
+		"type": "image_url",
+		"image_url": map[string]any{
+			"url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpeg),
+		},
+	})
 
 	body := map[string]any{
 		"model":       cfg.Model,
@@ -130,8 +136,9 @@ func Critique(cfg Config, jpeg []byte) Advice {
 		"max_tokens":  cfg.MaxTokens,
 		"temperature": cfg.Temperature,
 	}
-	if !cfg.Thinking {
-		body["enable_thinking"] = false
+	judge.ApplyThinking(body, cfg.Model, cfg.Thinking)
+	if strings.HasPrefix(strings.ToLower(cfg.Model), "deepseek") {
+		body["response_format"] = map[string]string{"type": "json_object"}
 	}
 
 	payload, err := json.Marshal(body)
@@ -219,7 +226,7 @@ func parseAdvice(blob string) Advice {
 		adv.Step = 0.1
 	}
 	// 只给了分数没给 good 时，用分数兜底
-	if adv.Score > 0 && adv.Score >= 85 && adv.Direction == DirNone {
+	if !reGood.MatchString(blob) && adv.Score >= 85 && adv.Direction == DirNone {
 		adv.Good = true
 	}
 	return adv
@@ -239,9 +246,9 @@ func clampStep(v float64) float64 {
 	return v
 }
 
-// fallback 认为「已够好」并停止迭代：宁可少迭代一轮，也不要在评审挂了的时候空转烧钱。
+// fallback 停止迭代，保留未评审状态。
 func fallback(err error) Advice {
-	return Advice{Good: true, Direction: DirNone, Fallback: true, Err: err}
+	return Advice{Direction: DirNone, Fallback: true, Err: err}
 }
 
 // Plan 根据评审建议算出下一轮要用的参数。
@@ -269,13 +276,9 @@ func Plan(adv Advice, scale, offsetX, offsetY float64) (nextScale float64, nextO
 	case DirSmaller:
 		nextScale = scale * (1 - step)
 	case DirAvoidCame:
-		// 压摄像头：先缩一点腾出空间，同时把图案往当前空的一侧推
+		// 镜头在智能对象画布顶部，避让必须下移，不能反向推入镜头区。
 		nextScale = scale * (1 - step)
-		if offsetY >= 0 {
-			nextOffY = offsetY - step*0.5
-		} else {
-			nextOffY = offsetY + step*0.5
-		}
+		nextOffY = offsetY + step*0.5
 	case DirUp:
 		nextOffY = offsetY - step
 	case DirDown:
