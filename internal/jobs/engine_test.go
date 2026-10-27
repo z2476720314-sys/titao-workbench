@@ -156,12 +156,13 @@ func TestStateMachineLegalTransitions(t *testing.T) {
 
 	// running → stopping → idle
 	e.Stop()
-	if got := e.State(); got != StateStopping {
-		t.Fatalf("停止请求后应为 stopping，得到 %s", got)
+	if got := e.State(); got != StateStopping && got != StateIdle {
+		t.Fatalf("停止请求后应为 stopping 或已完成的 idle，得到 %s", got)
 	}
 	waitFor(t, "回到 idle", func() bool { return e.State() == StateIdle })
 
 	// 收尾事件必须报「已停止」而不是「完成」
+	waitFor(t, "收到 done 事件", func() bool { return rec.doneEvent() != nil })
 	ev := rec.doneEvent()
 	if ev == nil {
 		t.Fatal("没有收到 done 事件")

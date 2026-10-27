@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/jpeg"
 	"image/png"
 	"os"
@@ -125,15 +126,45 @@ func toNRGBA(img image.Image) *image.NRGBA {
 	return dst
 }
 
-// alphaBounds 返回 alpha > 0 的包围盒。全透明时返回 false。
+// alphaBounds ignores distant near-invisible residue when locating the visible artwork.
 func alphaBounds(img *image.NRGBA) (image.Rectangle, bool) {
+	raw, ok := alphaBoundsAtLeast(img, 1)
+	if !ok {
+		return raw, false
+	}
+	visible, ok := alphaBoundsAtLeast(img, 8)
+	if !ok || visible == raw {
+		return raw, true
+	}
+	// Keep nearby antialiasing/glow; faint-only designs retain their original alpha bounds.
+	pad := max(1, min(16, min(img.Bounds().Dx(), img.Bounds().Dy())/100))
+	candidate := visible.Inset(-pad).Intersect(raw)
+	total, outside := 0, 0
+	for y := raw.Min.Y; y < raw.Max.Y; y++ {
+		for x := raw.Min.X; x < raw.Max.X; x++ {
+			if img.NRGBAAt(x, y).A != 0 {
+				total++
+				if !image.Pt(x, y).In(candidate) {
+					outside++
+				}
+			}
+		}
+	}
+	// Only discard sparse residue; a substantial faint composition is intentional content.
+	if outside > max(1, total/100) {
+		return raw, true
+	}
+	return candidate, true
+}
+
+func alphaBoundsAtLeast(img *image.NRGBA, minimum uint8) (image.Rectangle, bool) {
 	b := img.Bounds()
 	minX, minY := b.Max.X, b.Max.Y
 	maxX, maxY := b.Min.X-1, b.Min.Y-1
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		row := img.Pix[y*img.Stride:]
 		for x := b.Min.X; x < b.Max.X; x++ {
-			if row[x*4+3] == 0 {
+			if row[x*4+3] < minimum {
 				continue
 			}
 			if x < minX {
@@ -317,21 +348,7 @@ func downscale(src image.Image, maxSide int) image.Image {
 func FillWhite(src image.Image) image.Image {
 	b := src.Bounds()
 	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
-	white := color.RGBA{255, 255, 255, 255}
-	for y := 0; y < b.Dy(); y++ {
-		for x := 0; x < b.Dx(); x++ {
-			r, g, bl, a := src.At(b.Min.X+x, b.Min.Y+y).RGBA()
-			if a == 0 {
-				dst.Set(x, y, white)
-				continue
-			}
-			// alpha 合成到白底
-			af := float64(a) / 65535.0
-			mix := func(c uint32) uint8 {
-				return uint8((float64(c)/257.0)*af + 255.0*(1-af))
-			}
-			dst.Set(x, y, color.RGBA{mix(r), mix(g), mix(bl), 255})
-		}
-	}
+	draw.Draw(dst, dst.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	draw.Draw(dst, dst.Bounds(), src, b.Min, draw.Over)
 	return dst
 }

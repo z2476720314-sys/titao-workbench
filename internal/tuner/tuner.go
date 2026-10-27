@@ -137,9 +137,7 @@ func Critique(cfg Config, jpeg []byte, placement judge.Placement) Advice {
 		"temperature": cfg.Temperature,
 	}
 	judge.ApplyThinking(body, cfg.Model, cfg.Thinking)
-	if strings.HasPrefix(strings.ToLower(cfg.Model), "deepseek") {
-		body["response_format"] = map[string]string{"type": "json_object"}
-	}
+	judge.ApplyJSONResponse(body, cfg.Model)
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -158,8 +156,7 @@ func Critique(cfg Config, jpeg []byte, placement judge.Placement) Advice {
 	if timeout <= 0 {
 		timeout = 180 * time.Second
 	}
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
+	resp, err := judge.DoVisionRequest(req, timeout)
 	if err != nil {
 		return fallback(err)
 	}

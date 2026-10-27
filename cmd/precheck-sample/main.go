@@ -123,14 +123,14 @@ func run(args []string) (retErr error) {
 			errCnt++
 			continue
 		}
-		dataURL, err := imgutil.ThumbDataURL(p, settings.ImageMaxSide)
+		views, err := imgutil.PrecheckViews(p, settings.ImageMaxSide)
 		if err != nil {
 			fmt.Printf("%-4d THUMB-ERR %v\n", i+1, err)
 			errCnt++
 			continue
 		}
 		t0 := time.Now()
-		v := precheck.Check(jc, dataURL)
+		v := precheck.Inspect(jc, views)
 		el := time.Since(t0)
 
 		if v.Fallback {
@@ -159,6 +159,7 @@ func run(args []string) (retErr error) {
 			if err := ps.Append(precheck.Record{
 				Path: p, Size: fi.Size(), MTime: fi.ModTime().Unix(),
 				OK: v.OK, Reason: v.Reason, Tags: v.Tags,
+				FillTop: v.FillTop,
 			}); err != nil {
 				return fmt.Errorf("保存抽样记录失败：%w", err)
 			}

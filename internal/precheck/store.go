@@ -12,7 +12,7 @@ import (
 )
 
 // PolicyVersion invalidates decisions made by the previous permissive classifier.
-const PolicyVersion = 2
+const PolicyVersion = 4
 
 // Record 是记录库里的一行。
 //
@@ -24,6 +24,7 @@ type Record struct {
 	Size          int64    `json:"size"`
 	MTime         int64    `json:"mtime"` // unix 秒
 	OK            bool     `json:"ok"`
+	FillTop       bool     `json:"fill_top,omitempty"`
 	Reason        string   `json:"reason"`
 	Tags          []string `json:"tags"`
 	At            string   `json:"at"` // RFC3339

@@ -64,6 +64,7 @@ type Options struct {
 
 // Task 是一个「图案 × 模板」组合。
 type Task struct {
+	FillTop      bool     `json:"fillTop,omitempty"`
 	ID           int      `json:"id"`
 	Pattern      string   `json:"pattern"`
 	PatternName  string   `json:"patternName"`
@@ -614,9 +615,6 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 
 	defer func() {
 		e.mu.Lock()
-		e.running = false
-		e.state = StateIdle
-		e.cancel = nil
 		done, failed := e.done, e.failed
 		skipped, skipTags := e.skipped, e.skipTags
 		e.mu.Unlock()
@@ -643,6 +641,12 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 		}
 		// 收尾再落一次：把 done/finished 刷新到磁盘
 		e.saveQueue(opt)
+		// Publish idle only after the final queue write, so Resume cannot race it.
+		e.mu.Lock()
+		e.running = false
+		e.state = StateIdle
+		e.cancel = nil
+		e.mu.Unlock()
 		e.emit(Event{Type: "done", Total: len(tasks), Done: done, Failed: failed,
 			Skipped: skipped, Running: false, Message: msg})
 	}()
@@ -801,6 +805,9 @@ func (e *Engine) precheckOne(ctx context.Context, def cfg.Config,
 	// 1) 记录库命中
 	if store != nil {
 		if r, ok := store.Lookup(t.Pattern, st.Size(), st.ModTime().Unix()); ok {
+			if r.OK {
+				e.updateTask(t, func(t *Task) { t.FillTop = r.FillTop })
+			}
 			if !r.OK && def.PrecheckSkip {
 				e.markSkipped(t, r.Reason, r.Tags, "命中记录")
 				return true
@@ -820,7 +827,7 @@ func (e *Engine) precheckOne(ctx context.Context, def cfg.Config,
 		t.Message = "预检图案"
 	})
 
-	dataURL, err := imgutil.ThumbDataURL(t.Pattern, def.ImageMaxSide)
+	views, err := imgutil.PrecheckViews(t.Pattern, def.ImageMaxSide)
 	if err != nil {
 		if def.PrecheckSkip {
 			e.failTask(t, fmt.Errorf("预检缩略图失败，未套图: %w", err))
@@ -830,7 +837,7 @@ func (e *Engine) precheckOne(ctx context.Context, def cfg.Config,
 		return false
 	}
 
-	v := precheck.Check(jc, dataURL)
+	v := precheck.Inspect(jc, views)
 	if v.Fallback {
 		if def.PrecheckSkip {
 			e.failTask(t, fmt.Errorf("预检未确认合格，未套图: %w", v.Err))
@@ -844,12 +851,13 @@ func (e *Engine) precheckOne(ctx context.Context, def cfg.Config,
 	// 3) 落库
 	if store != nil {
 		rec := precheck.Record{
-			Path:   t.Pattern,
-			Size:   st.Size(),
-			MTime:  st.ModTime().Unix(),
-			OK:     v.OK,
-			Reason: v.Reason,
-			Tags:   v.Tags,
+			Path:    t.Pattern,
+			Size:    st.Size(),
+			MTime:   st.ModTime().Unix(),
+			OK:      v.OK,
+			Reason:  v.Reason,
+			Tags:    v.Tags,
+			FillTop: v.FillTop,
 		}
 		if err := store.Append(rec); err != nil {
 			e.logf("warn", "  预检记录落盘失败: %v", err)
@@ -857,6 +865,7 @@ func (e *Engine) precheckOne(ctx context.Context, def cfg.Config,
 	}
 
 	if v.OK {
+		e.updateTask(t, func(t *Task) { t.FillTop = v.FillTop })
 		e.logf("dim", "  [%d/%d] 预检通过：%s", seq, total, t.PatternName)
 		return false
 	}
@@ -967,15 +976,30 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		e.logf("dim", "  图案 %dx%d", pr.Width, pr.Height)
 	}
 
+	referencePath := patPath
+	fillTop := opt.Auto && opt.NoCrop && fitIsContainLike(opt.Fit) && t.FillTop
+	if fillTop {
+		extended := filepath.Join(tmp, "background.png")
+		extra, err := imgutil.ExtendBackgroundTop(patPath, extended)
+		if err != nil {
+			e.failTask(t, fmt.Errorf("顶部续铺: %w", err))
+			return
+		}
+		fillTop = extra > 0
+		if fillTop {
+			patPath = extended
+			e.logf("info", "  满版背景顶部续铺 %dpx，原图像素保留", extra)
+		}
+	}
 	// 2) 多轮参数微调
 	//    第一轮用候选档位让视觉模型挑，之后每轮按评审建议用单档重渲，
 	//    直到模型说「够了」、调不动、或到达 max_rounds 上限。
 	//    关闭自动判断或 auto_tune_on 时退化为原来的单轮行为。
 	tc := tuner.Config(jc)
 	reviewOn := opt.Auto && def.AutoTuneOn
-	placement := judge.Placement{Fit: opt.Fit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY}
+	placement := judge.Placement{Fit: opt.Fit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, FillTop: fillTop}
 	if opt.Auto {
-		placement.SourceDataURL, err = imgutil.ThumbDataURL(patPath, def.ImageMaxSide)
+		placement.SourceDataURL, err = imgutil.ThumbDataURL(referencePath, def.ImageMaxSide)
 		if err != nil {
 			e.failTask(t, fmt.Errorf("生成原图对照: %w", err))
 			return
@@ -1005,6 +1029,11 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		e.logf("dim", "  禁止裁切：实际候选档位 %v", scales)
 	}
 	offX, offY := opt.OffsetX, opt.OffsetY
+	if fillTop {
+		scales = []float64{1}
+		offX, offY = 0, 0
+		placement.OffsetX, placement.OffsetY = 0, 0
+	}
 	var (
 		flatPick    string  // 最终选中的拼合图
 		chosenScale float64 // 最终填充倍数
@@ -1159,7 +1188,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			}
 			bestScale, bestScore, bestNote = chosenScale, adv.Score, chosenNote
 		}
-		if round >= rounds {
+		if round >= rounds || fillTop {
 			e.logf("info", "  最终评审 %d 分：%s（合格=%t）", adv.Score, adv.Problem, reviewGood)
 			break
 		}

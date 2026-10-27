@@ -105,7 +105,17 @@ func TestReportsFailuresAndPreservesRecords(t *testing.T) {
 			before, _ := os.ReadFile(path)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"watermark\":false,\"lens\":false,\"case_edge\":false,\"case_photo\":false,\"reason\":\"clean\"}"}}]}`))
+				var request map[string]any
+				json.NewDecoder(r.Body).Decode(&request)
+				prompt := request["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+				content := `{"watermark":false,"lens":false,"case_edge":false,"case_photo":false,"reason":"clean"}`
+				if strings.Contains(prompt, "只做几何轮廓检测") {
+					content = `{"rounded_panels":false,"layout":"无"}`
+				}
+				if strings.Contains(prompt, "水印痕迹检查") {
+					content = `{"watermark":false,"uncertain":false,"evidence":"无水印"}`
+				}
+				json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})
 			}))
 			defer srv.Close()
 			c := cfg.Default()

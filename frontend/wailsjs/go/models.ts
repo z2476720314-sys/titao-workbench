@@ -313,6 +313,7 @@ export namespace jobs {
 	}
 	
 	export class Task {
+	    fillTop?: boolean;
 	    id: number;
 	    pattern: string;
 	    patternName: string;
@@ -335,6 +336,7 @@ export namespace jobs {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.fillTop = source["fillTop"];
 	        this.id = source["id"];
 	        this.pattern = source["pattern"];
 	        this.patternName = source["patternName"];

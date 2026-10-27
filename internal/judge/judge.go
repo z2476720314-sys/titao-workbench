@@ -33,6 +33,7 @@ type Config struct {
 
 // Placement 把实际渲染约束与原图一起交给选档和评审。
 type Placement struct {
+	FillTop                 bool
 	SourceDataURL           string
 	Fit                     string
 	NoCrop                  bool
@@ -44,7 +45,11 @@ func (p Placement) Description() string {
 	if p.Scale > 0 {
 		scale = fmt.Sprintf("scale=%.3f", p.Scale)
 	}
-	return fmt.Sprintf("实际参数：fit=%s，no_crop=%t，%s，offset_x=%.3f，offset_y=%.3f。scale=1 是当前适配模式的基准，正 x 向右、正 y 向下；位移按图案原始画布方向判断。no_crop=true 时不许为减少留白裁掉主体，优先在完整保留图案的前提下贴合底部与左右。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY)
+	text := fmt.Sprintf("实际参数：fit=%s，no_crop=%t，%s，offset_x=%.3f，offset_y=%.3f。scale=1 是当前适配模式的基准，正 x 向右、正 y 向下；位移按图案原始画布方向判断。no_crop=true 时不许为减少留白裁掉主体，优先在完整保留图案的前提下贴合底部与左右。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY)
+	if p.FillTop {
+		text += "这是一张确认过的满版重复背景，已按2:1画布贴合左右底部，并只续铺顶部缺口。请检查接缝、轮廓和保真，不要建议缩小背景重新制造留白。"
+	}
+	return text
 }
 
 // Candidate 是一个候选。
@@ -133,9 +138,7 @@ func Choose(cfg Config, cands []Candidate, patternName string, placement Placeme
 		"temperature": cfg.Temperature,
 	}
 	ApplyThinking(body, cfg.Model, cfg.Thinking)
-	if strings.HasPrefix(strings.ToLower(cfg.Model), "deepseek") {
-		body["response_format"] = map[string]string{"type": "json_object"}
-	}
+	ApplyJSONResponse(body, cfg.Model)
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -154,8 +157,7 @@ func Choose(cfg Config, cands []Candidate, patternName string, placement Placeme
 	if timeout <= 0 {
 		timeout = 180 * time.Second
 	}
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
+	resp, err := DoVisionRequest(req, timeout)
 	if err != nil {
 		return fallback(len(cands), err)
 	}

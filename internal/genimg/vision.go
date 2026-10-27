@@ -271,8 +271,7 @@ func chat(ctx context.Context, vc VisionConfig, text string, images [][]byte) (s
 	req.Header.Set("Authorization", "Bearer "+vc.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: vc.Timeout}
-	resp, err := client.Do(req)
+	resp, err := judge.DoVisionRequest(req, vc.Timeout)
 	if err != nil {
 		return "", fmt.Errorf("请求视觉模型: %w", err)
 	}
