@@ -26,6 +26,8 @@ type Config struct {
 	BaseURL      string    `json:"base_url"`
 	APIKey       string    `json:"api_key"`
 	Model        string    `json:"model"`
+	TuneModel    string    `json:"tune_model"`
+	TuneAPIKey   string    `json:"tune_api_key,omitempty"`
 	MaxTokens    int       `json:"max_tokens"`
 	TimeoutSec   int       `json:"timeout_seconds"`
 	Temperature  float64   `json:"temperature"`
@@ -83,6 +85,7 @@ func Default() Config {
 		Renderer:     "photoshop",
 		BaseURL:      "https://www.acctoken.com/v1",
 		Model:        "deepseek-v4.1-flash",
+		TuneModel:    "deepseek-v4.1-flash",
 		MaxTokens:    4000,
 		TimeoutSec:   180,
 		Temperature:  0.1,

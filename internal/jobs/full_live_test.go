@@ -30,6 +30,14 @@ func TestLiveFullMockups(t *testing.T) {
 	if model := os.Getenv("TITAO_PRECHECK_MODEL"); model != "" {
 		settings.Model = model
 	}
+	if path := os.Getenv("TITAO_TUNING_KEY_FILE"); path != "" {
+		key, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal("unable to read tuning credential")
+		}
+		settings.TuneAPIKey = string(key)
+	}
+	settings.PrecheckOn, settings.PrecheckSkip = true, true
 	var cases struct {
 		Patterns []struct {
 			Path   string `json:"path"`
@@ -135,7 +143,7 @@ func TestLiveFullMockups(t *testing.T) {
 			files++
 		}
 	}
-	report := map[string]any{"model": settings.Model, "engine_version": version, "Done": final.Done, "Failed": final.Failed, "Skipped": final.Skipped, "Files": files, "tasks": tasks}
+	report := map[string]any{"precheck_model": settings.Model, "tune_model": settings.TuneModel, "engine_version": version, "Done": final.Done, "Failed": final.Failed, "Skipped": final.Skipped, "Files": files, "tasks": tasks}
 	b, err = json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		t.Fatal(err)

@@ -6,6 +6,8 @@ export namespace cfg {
 	    base_url: string;
 	    api_key: string;
 	    model: string;
+	    tune_model: string;
+	    tune_api_key?: string;
 	    max_tokens: number;
 	    timeout_seconds: number;
 	    temperature: number;
@@ -49,6 +51,8 @@ export namespace cfg {
 	        this.base_url = source["base_url"];
 	        this.api_key = source.api_key;
 	        this.model = source["model"];
+	        this.tune_model = source["tune_model"];
+	        this.tune_api_key = source.tune_api_key;
 	        this.max_tokens = source["max_tokens"];
 	        this.timeout_seconds = source["timeout_seconds"];
 	        this.temperature = source["temperature"];
@@ -154,6 +158,8 @@ export namespace imgutil {
 	    OrigBBox?: Rect;
 	    OrigWidth: number;
 	    OrigHeight: number;
+	    BottomContent: boolean;
+	    FullBackground: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new PatternResult(source);
@@ -168,6 +174,8 @@ export namespace imgutil {
 	        this.OrigBBox = this.convertValues(source["OrigBBox"], Rect);
 	        this.OrigWidth = source["OrigWidth"];
 	        this.OrigHeight = source["OrigHeight"];
+	        this.BottomContent = source["BottomContent"];
+	        this.FullBackground = source["FullBackground"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

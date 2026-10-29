@@ -35,9 +35,14 @@ func (p *backgroundEditor) Render(r psx.RenderRequest) (string, error) {
 	return p.reviewPhotoshop.Render(r)
 }
 
-func TestAlloverBackgroundExtendsWithoutChangingScale(t *testing.T) {
-	for _, height := range []int{70, 90} {
-		t.Run(strconv.Itoa(height), func(t *testing.T) {
+func TestOpaqueBackgroundStartsFullAndOnlyFineTunesRealIssues(t *testing.T) {
+	for _, tc := range []struct {
+		height    int
+		direction string
+		calls     int
+	}{{70, "smaller", 1}, {90, "smaller", 1}, {70, "right", 2}} {
+		height := tc.height
+		t.Run(strconv.Itoa(height)+tc.direction, func(t *testing.T) {
 			e, _, _ := newTestEngine(t)
 			editor := &backgroundEditor{}
 			e.ps = editor
@@ -56,18 +61,18 @@ func TestAlloverBackgroundExtendsWithoutChangingScale(t *testing.T) {
 			calls := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
-				json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": `{"good":true,"score":90,"problem":"无","direction":"none","step":0.1}`}}}})
+				content := `{"good":false,"score":70,"problem":"主体遮挡","direction":"` + tc.direction + `","step":0.1}`
+				if calls > 1 {
+					content = `{"good":true,"score":90,"problem":"无","direction":"none","step":0.1}`
+				}
+				json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})
 			}))
 			defer srv.Close()
 			settings := cfg.Default()
 			task := &Task{ID: 1, Pattern: path, PatternName: "background", Template: tpl, TemplateName: "template", FillTop: true}
 			opt := Options{Auto: true, NoCrop: true, Fit: "auto", Scales: settings.Candidates, CellSize: 80, JPGQuality: 90}
 			e.processOne(context.Background(), opt, settings, judge.Config{BaseURL: srv.URL, APIKey: "dummy", Model: "test", MaxTokens: 100, Timeout: time.Second}, task, filepath.Join(dir, "out"), 1, 1)
-			wantScales, wantCalls := 1, 1
-			if height > 80 {
-				wantScales, wantCalls = len(squashScales(settings.Candidates)), 2
-			}
-			if task.Phase != PhaseDone || editor.size != image.Pt(40, max(80, height)) || len(editor.requests) != 1 || len(editor.requests[0].Scales) != wantScales || calls != wantCalls {
+			if task.Phase != PhaseDone || editor.size != image.Pt(40, height) || len(editor.requests) != tc.calls || editor.requests[0].Fit != "cover" || len(editor.requests[0].Scales) != 1 || calls != tc.calls {
 				t.Fatalf("background flow: phase=%s size=%v renders=%d calls=%d", task.Phase, editor.size, len(editor.requests), calls)
 			}
 		})

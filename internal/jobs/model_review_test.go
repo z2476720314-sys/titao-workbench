@@ -71,8 +71,8 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	im := image.NewRGBA(image.Rect(0, 0, 40, 70))
-	draw.Draw(im, im.Bounds(), image.NewUniform(color.RGBA{255, 100, 20, 255}), image.Point{}, draw.Src)
+	im := image.NewRGBA(image.Rect(0, 0, 40, 90))
+	draw.Draw(im, image.Rect(0, 10, 40, 80), image.NewUniform(color.RGBA{255, 100, 20, 255}), image.Point{}, draw.Src)
 	if err := png.Encode(f, im); err != nil {
 		t.Fatal(err)
 	}
@@ -88,11 +88,8 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 			t.Error(err)
 		}
 		requests = append(requests, body)
-		content := `{"pick":5,"reason":"大档更合适"}`
+		content := `{"good":false,"score":70,"problem":"偏大","direction":"smaller","step":0.1}`
 		if len(requests) == 2 {
-			content = `{"good":false,"score":70,"problem":"偏大","direction":"smaller","step":0.1}`
-		}
-		if len(requests) == 3 {
 			content = `{"good":true,"score":91,"problem":"无","direction":"none","step":0.05}`
 			if finalFailure {
 				content = "invalid response"
@@ -113,7 +110,7 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 	if len(ps.requests) != 2 {
 		t.Fatalf("render count = %d", len(ps.requests))
 	}
-	want := []float64{0.654, 0.731, 0.808, 0.885, 1}
+	want := []float64{1}
 	if fmt.Sprint(ps.requests[0].Scales) != fmt.Sprint(want) {
 		t.Errorf("actual candidates = %v; want %v", ps.requests[0].Scales, want)
 	}
@@ -124,7 +121,7 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 	if task.ChosenScale != wantScale {
 		t.Errorf("chosen scale = %v; want %v", task.ChosenScale, wantScale)
 	}
-	if len(requests) != 3 {
+	if len(requests) != 2 {
 		t.Fatalf("model calls = %d; final render must also be reviewed", len(requests))
 	}
 	for i, body := range requests {
@@ -137,9 +134,6 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 			t.Errorf("request %d has incorrect actual parameters", i)
 		}
 		wantImages := 2
-		if i == 0 {
-			wantImages = 6
-		}
 		images := 0
 		for _, c := range content {
 			if c.(map[string]any)["type"] == "image_url" {

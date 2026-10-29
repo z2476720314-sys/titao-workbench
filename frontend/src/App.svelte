@@ -701,7 +701,7 @@
   }
 
   const FIT_OPTS = [
-    { v: 'auto', label: 'auto · 完整放下（推荐）', hint: '图案整体可见，配合「不裁切」自动收敛' },
+    { v: 'auto', label: 'auto · 自动摆放（推荐）', hint: '无透明底满铺；透明图案按原构图贴底或居中' },
     { v: 'contain', label: 'contain · 完整放下', hint: '同 auto，显式指定' },
     { v: 'cover', label: 'cover · 铺满', hint: '以铺满为基准' },
     { v: 'stretch', label: 'stretch · 拉伸变形', hint: '不保持宽高比' },
@@ -927,7 +927,7 @@
               <span style="color:var(--text);font-size:12px">视觉模型自动判断图案大小</span>
             </label>
             <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-              渲染候选档 → 模型挑最合适的一张 → 再按评审建议微调 {maxRounds} 轮。关掉则用固定档位。
+              无透明底直接满铺；透明图案底部有内容则贴底，独立图案居中。主要内容完整且无明显遮挡就通过。
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
@@ -1000,7 +1000,7 @@
                 <span style="color:var(--text);font-size:12px">图案必须完整可见（不裁切）</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                开启后图案整体不会被壳边裁掉，放大上限自动压到「完整放下」；宽扁、窄长图案强烈建议保持开启。
+                透明主体完整保留；无透明底的整幅背景仍按比例满铺，边缘背景可能略裁。
               </div>
             </div>
 
@@ -1522,7 +1522,7 @@
           <div class="card-head">
             <div>
               <div class="card-title">视觉模型</div>
-              <div class="card-hint">用于自动判断图案摆放大小</div>
+              <div class="card-hint">共用接口，可分别设置 Key</div>
             </div>
             <span class={conf.api_key ? 'pill ok' : 'pill warn'}>{conf.api_key ? '已配置 Key' : '缺少 API Key'}</span>
           </div>
@@ -1532,13 +1532,23 @@
               <input type="text" bind:value={conf.base_url} placeholder="https://.../v1" />
             </div>
             <div class="field">
-              <span class="lbl">模型</span>
-              <input type="text" bind:value={conf.model} placeholder="deepseek-v4.1-flash" />
+              <label class="lbl" for="precheck-model">预检模型</label>
+              <input id="precheck-model" type="text" bind:value={conf.model} placeholder="gpt-6-luna" />
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label class="lbl" for="tune-model">套图微调模型</label>
+              <input id="tune-model" type="text" bind:value={conf.tune_model} placeholder={conf.model || 'deepseek-v4.1-flash'} />
+            </div>
+            <div class="field">
+              <span class="lbl">预检 API Key</span>
+              <input type="text" bind:value={conf.api_key} placeholder="sk-..." />
             </div>
           </div>
           <div class="field">
-            <span class="lbl">API Key</span>
-            <input type="text" bind:value={conf.api_key} placeholder="sk-..." />
+            <label class="lbl" for="tune-api-key">微调 API Key（留空沿用预检 Key）</label>
+            <input id="tune-api-key" type="password" bind:value={conf.tune_api_key} placeholder="留空复用预检 Key" />
           </div>
           <div class="grid-4">
             <div class="field">
@@ -1559,14 +1569,14 @@
             </div>
           </div>
           <div class="field">
-            <span class="lbl">候选倍数（逗号分隔）</span>
+            <span class="lbl">其他适配模式的候选倍数（逗号分隔）</span>
             <input type="text" value={(conf.candidates || []).join(', ')}
                    on:change={(e) => {
                      const v = (e.currentTarget as HTMLInputElement).value
                      conf.candidates = v.split(/[,，\s]+/).map((s) => parseFloat(s)).filter((n) => !isNaN(n) && n > 0)
                    }} />
             <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-              区间要覆盖「明显偏小 → 明显超出」，模型才能做绝对判断；区间太窄它只能相对比较，选出的倍数会漂移。
+              自动微调的 auto / contain 从 1.0 开始；其他模式或关闭自动微调时使用候选倍数。
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
@@ -1726,7 +1736,7 @@
                 <span style="color:var(--text);font-size:12px">启用多轮自动微调</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                先出一版，再由视觉模型打分指出「偏大/偏小/偏了」，自动重渲，直到达标或到轮数上限。
+                先按原图铺放，只在主要内容明显裁切或遮挡时微调；正常直接通过，满版图调整后仍须铺满。
               </div>
             </div>
             <div class="field">
@@ -1803,7 +1813,7 @@
           <li>模板 TIF 复制到临时目录，<b>原文件永不打开或修改</b>。</li>
           <li>进入「插画」组里每个智能对象内部的 PSB，隐藏原有图层后置入图案并居中。</li>
           <li>多个格子共享同一个 PSB 源时只替换一次，关联格一起更新（同款图案的不同手持角度）。</li>
-          <li>按候选倍数各渲染一张整幅拼合图，交视觉模型挑最饱满且不裁坏的一张。</li>
+          <li>无透明底直接满铺；透明图案底部有内容则贴底，独立图案居中。主要内容无明显遮挡就通过。</li>
           <li>按每 <span class="mono">{cellSize}px</span> 一格切格，导出高质量 JPG。</li>
         </ol>
       </section>

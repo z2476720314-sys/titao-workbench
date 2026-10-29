@@ -690,9 +690,19 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 		ImageMaxSide: settings.ImageMaxSide,
 		Thinking:     settings.Thinking,
 	}
+	tuneConfig := jc
+	if model := strings.TrimSpace(settings.TuneModel); model != "" {
+		tuneConfig.Model = model
+	}
+	if key := strings.TrimSpace(settings.TuneAPIKey); key != "" {
+		tuneConfig.APIKey = key
+	}
 
 	e.logf("info", "开始：%d 个组合 / 输出到 %s / %s",
-		len(tasks), outRoot, autoLabel(opt.Auto, settings.Model))
+		len(tasks), outRoot, autoLabel(opt.Auto, tuneConfig.Model))
+	if settings.PrecheckOn {
+		e.logf("info", "预检模型 %s / 套图微调模型 %s", jc.Model, tuneConfig.Model)
+	}
 
 	// 清掉上次残留的 PS 文档，避免互相干扰
 	if err := e.closeDocs(); err != nil {
@@ -722,7 +732,7 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 			e.saveQueue(opt)
 			continue
 		}
-		e.processFn(e, ctx, opt, settings, jc, t, outRoot, i+1, len(tasks))
+		e.processFn(e, ctx, opt, settings, tuneConfig, t, outRoot, i+1, len(tasks))
 		// 组结束后落盘：强杀恢复时能准确知道这组已完成
 		e.saveQueue(opt)
 	}
@@ -977,7 +987,13 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	}
 
 	referencePath := patPath
-	fillTop := opt.Auto && opt.NoCrop && fitIsContainLike(opt.Fit) && t.FillTop
+	fullBleed := opt.Auto && fitIsContainLike(opt.Fit) && pr.FullBackground
+	renderFit := opt.Fit
+	if fullBleed {
+		renderFit = psx.FitCover
+		e.logf("dim", "  原图无透明底：按原比例直接满铺，仅检查主要内容遮挡")
+	}
+	fillTop := opt.Auto && opt.NoCrop && fitIsContainLike(opt.Fit) && t.FillTop && !fullBleed
 	if fillTop {
 		extended := filepath.Join(tmp, "background.png")
 		extra, err := imgutil.ExtendBackgroundTop(patPath, extended)
@@ -992,12 +1008,16 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		}
 	}
 	// 2) 多轮参数微调
-	//    第一轮用候选档位让视觉模型挑，之后每轮按评审建议用单档重渲，
+	//    完整放下时先按原比例居中渲染，只在评审发现主要内容问题时重渲，
 	//    直到模型说「够了」、调不动、或到达 max_rounds 上限。
 	//    关闭自动判断或 auto_tune_on 时退化为原来的单轮行为。
 	tc := tuner.Config(jc)
 	reviewOn := opt.Auto && def.AutoTuneOn
-	placement := judge.Placement{Fit: opt.Fit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, FillTop: fillTop}
+	alignBottom := pr.BottomContent && fitIsContainLike(renderFit)
+	placement := judge.Placement{Fit: renderFit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, FillTop: fillTop, AlignBottom: alignBottom, FullBleed: fullBleed}
+	if alignBottom {
+		e.logf("dim", "  原图底部有内容：按原比例贴合壳底")
+	}
 	if opt.Auto {
 		placement.SourceDataURL, err = imgutil.ThumbDataURL(referencePath, def.ImageMaxSide)
 		if err != nil {
@@ -1020,6 +1040,9 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	}
 
 	scales := opt.Scales
+	if reviewOn && fitIsContainLike(opt.Fit) {
+		scales = []float64{1}
+	}
 
 	// 禁止裁切：auto/contain 语义下 1.0 就是「完整放下」的极限，
 	// 任何 >1 的档位都会把图案推出壳面被裁掉。宽扁图案（如 945x574）
@@ -1029,7 +1052,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		e.logf("dim", "  禁止裁切：实际候选档位 %v", scales)
 	}
 	offX, offY := opt.OffsetX, opt.OffsetY
-	if fillTop {
+	if fillTop || fullBleed {
 		scales = []float64{1}
 		offX, offY = 0, 0
 		placement.OffsetX, placement.OffsetY = 0, 0
@@ -1067,13 +1090,14 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			TemplateCopy: tplCopy,
 			Pattern:      patPath,
 			Group:        opt.Group,
-			Fit:          opt.Fit,
+			Fit:          renderFit,
 			Scales:       scales,
 			OffsetX:      offX,
 			OffsetY:      offY,
 			OutDir:       tmp,
 			PSVersion:    def.PSVersion,
 			NoCrop:       opt.NoCrop,
+			AlignBottom:  alignBottom,
 		}
 		log, err := e.ps.Render(req)
 		for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
@@ -1202,7 +1226,10 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 
 		// 禁止裁切时，微调不能把图案放大到超出壳面。
 		// 只压回上限、不放弃这一轮：模型可能同时给了位移建议，位移仍要生效。
-		if opt.NoCrop && fitIsContainLike(opt.Fit) && nextScale > 1 {
+		if fullBleed && nextScale < 1 {
+			nextScale = 1
+		}
+		if !fullBleed && opt.NoCrop && fitIsContainLike(opt.Fit) && nextScale > 1 {
 			e.logf("info", "  禁止裁切：x%.2f 超出完整放下上限，压回 x1.00", nextScale)
 			nextScale = 1
 		}

@@ -227,11 +227,19 @@ func placementScale(req psx.RenderRequest, t float64, cw, ch, pw, ph int) (float
 
 func placementCenter(req psx.RenderRequest, cw, ch int, w, h float64) (float64, float64) {
 	x, y := float64(cw)/2, float64(ch)/2
-	if req.Fit == "" || req.Fit == psx.FitAuto || req.Fit == psx.FitContain {
+	if req.AlignBottom && (req.Fit == "" || req.Fit == psx.FitAuto || req.Fit == psx.FitContain) {
 		y = float64(ch) - h/2
 	}
 	x += float64(cw) * req.OffsetX
 	y += float64(ch) * req.OffsetY
+	if req.Fit == psx.FitCover {
+		if w >= float64(cw) {
+			x = math.Max(float64(cw)-w/2, math.Min(w/2, x))
+		}
+		if h >= float64(ch) {
+			y = math.Max(float64(ch)-h/2, math.Min(h/2, y))
+		}
+	}
 	if req.NoCrop && req.Fit != psx.FitCover && req.Fit != psx.FitStretch {
 		x = math.Max(w/2, math.Min(float64(cw)-w/2, x))
 		y = math.Max(h/2, math.Min(float64(ch)-h/2, y))

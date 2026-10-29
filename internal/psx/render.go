@@ -32,7 +32,7 @@ type RenderRequest struct {
 	Fit string
 	// Scales 是各档填充倍数：1.0 = 刚好铺满壳面，<1 留白，>1 超出被裁切。
 	Scales []float64
-	// OffsetX / OffsetY 占画布宽/高的比例；auto/contain 以贴底为基准，其余居中。
+	// OffsetX / OffsetY 占画布宽/高的比例，以居中为基准。
 	OffsetX float64
 	OffsetY float64
 	// OutDir 是拼合图输出目录，脚本会写入 flat_0.png…flat_N.png。
@@ -40,6 +40,8 @@ type RenderRequest struct {
 	// NoCrop 为 true 时把缩放硬性限制在「完整放下」以内（T 超过 1 会被压回 1），
 	// 保证图案任何可见部分都不会被壳边裁掉。cover / stretch 不受影响。
 	NoCrop bool
+	// AlignBottom preserves artwork that reaches the original canvas bottom.
+	AlignBottom bool
 	// PSVersion 是 Photoshop 版本号，用于版本自适应能力校验。
 	//
 	// 留空时由 Render 从当前会话实时读取（每次渲染多一次 COM 属性读取），
@@ -312,7 +314,11 @@ const jsxRender = `(function(){
               var OFX = __OFX__, OFY = __OFY__;
               var nw = b2[2].as("px") - b2[0].as("px"), nh = b2[3].as("px") - b2[1].as("px");
               var tx = (cw - nw) / 2 + cw * OFX;
-              var ty = ((FIT == "auto" || FIT == "contain" || FIT == "") ? ch - nh : (ch - nh) / 2) + ch * OFY;
+              var ty = (__BOTTOM__ ? ch - nh : (ch - nh) / 2) + ch * OFY;
+              if (FIT == "cover") {
+                if (nw >= cw) tx = Math.max(cw - nw, Math.min(0, tx));
+                if (nh >= ch) ty = Math.max(ch - nh, Math.min(0, ty));
+              }
               if (NOCROP && FIT != "stretch" && FIT != "cover") {
                 tx = Math.max(0, Math.min(cw - nw, tx));
                 ty = Math.max(0, Math.min(ch - nh, ty));
@@ -384,6 +390,8 @@ func (s *Session) Render(req RenderRequest) (string, error) {
 	jsx = strings.ReplaceAll(jsx, "__OFY__", fmt.Sprintf("%g", req.OffsetY))
 	jsx = strings.ReplaceAll(jsx, "__OUTDIR__", escapePath(req.OutDir))
 	jsx = strings.ReplaceAll(jsx, "__NOCROP__", fmt.Sprintf("%t", req.NoCrop))
+	bottom := req.AlignBottom && (req.Fit == "" || req.Fit == FitAuto || req.Fit == FitContain)
+	jsx = strings.ReplaceAll(jsx, "__BOTTOM__", fmt.Sprintf("%t", bottom))
 
 	var log string
 	err = s.Do(func(c *Conn) error {

@@ -34,6 +34,8 @@ type Config struct {
 // Placement 把实际渲染约束与原图一起交给选档和评审。
 type Placement struct {
 	FillTop                 bool
+	AlignBottom             bool
+	FullBleed               bool
 	SourceDataURL           string
 	Fit                     string
 	NoCrop                  bool
@@ -45,9 +47,19 @@ func (p Placement) Description() string {
 	if p.Scale > 0 {
 		scale = fmt.Sprintf("scale=%.3f", p.Scale)
 	}
-	text := fmt.Sprintf("实际参数：fit=%s，no_crop=%t，%s，offset_x=%.3f，offset_y=%.3f。scale=1 是当前适配模式的基准，正 x 向右、正 y 向下；位移按图案原始画布方向判断。no_crop=true 时不许为减少留白裁掉主体，优先在完整保留图案的前提下贴合底部与左右。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY)
+	baseline := "按原比例完整放下"
+	if p.FullBleed {
+		baseline = "按原比例铺满壳面，边缘背景可以略裁，主要内容必须保留"
+	}
+	text := fmt.Sprintf("实际参数：fit=%s，no_crop=%t，%s，offset_x=%.3f，offset_y=%.3f。scale=1 的基准是%s，零偏移为居中，正 x 向右、正 y 向下；位移按图案原始画布方向判断。优先保持基准大小，只在主要内容被明显裁切或遮挡时调整，不许裁掉主体。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY, baseline)
 	if p.FillTop {
 		text += "这是一张确认过的满版重复背景，已按2:1画布贴合左右底部，并只续铺顶部缺口。请检查接缝、轮廓和保真，不要建议缩小背景重新制造留白。"
+	}
+	if p.AlignBottom {
+		text += "本图在原画布底部已有实际内容，已自动贴底定位；底部必须贴合壳底，不要为了居中建议上移。主要内容完整且无明显遮挡就通过。"
+	}
+	if p.FullBleed {
+		text += "本图无透明底，是完整背景设计，必须保持满铺；只评估中心主要文字、人物或标志是否被明显裁切或遮挡。角落拼贴小字、帽尖或背景装饰被镜头自然遮住不算主体问题。确有主体问题才微调，调整后仍须铺满，禁止缩小留边。"
 	}
 	return text
 }
@@ -80,7 +92,7 @@ const promptTemplate = `你是手机壳商品图评审。这是同一个图案�
 
 按下面的标准挑出最好的一张：
 1. 对照原图案保护主体、比例、方向、透明区域与细节。原图透明区域用白底预览，不代表要在壳上印白色矩形。原图已有的平直底边不应悬在壳面中间形成贴纸截边。
-2. 在满足实际不裁切约束的候选中，优先选大小饱满、底部贴合、左右平衡的图，不要无理由缩小。
+2. 优先保持原比例、基准大小和居中；主要内容完整且无明显遮挡就合格。独立文字、数字和标志允许正常留白；底部确有需要接壳底的连续场景内容且悬空时可以小幅下移，不要为更饱满而缩放。
 3. 摄像头、边框、手指自然遮挡背景装饰是正常实物关系，不要为了躲开整个镜头区域把整幅图缩小。关键人物脸部或文字被镜头遮挡才需避让。
 4. 透明孔洞露出壳色、壳体边框、相机开孔与拍摄透视不是图案缺失，不要求图案覆盖这些区域。
 5. 原图应跟随壳的方向旋转，不得镜像或拉伸；按印刷背板判断，保留原壳面材质与光影。

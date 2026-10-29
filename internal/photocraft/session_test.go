@@ -25,14 +25,31 @@ func TestPlacementPreservesFitAndNoCrop(t *testing.T) {
 	}
 }
 
-func TestContainAnchorsBottomAndBoundsOffsets(t *testing.T) {
+func TestContainCentersAndBoundsOffsets(t *testing.T) {
 	x, y := placementCenter(psx.RenderRequest{Fit: "auto", NoCrop: true}, 100, 200, 100, 160)
+	if x != 50 || y != 100 {
+		t.Fatalf("center anchor: (%v,%v)", x, y)
+	}
+	var bottomReq psx.RenderRequest
+	if err := json.Unmarshal([]byte(`{"Fit":"auto","NoCrop":true,"AlignBottom":true}`), &bottomReq); err != nil {
+		t.Fatal(err)
+	}
+	x, y = placementCenter(bottomReq, 100, 200, 100, 160)
 	if x != 50 || y != 120 {
-		t.Fatalf("bottom anchor: (%v,%v)", x, y)
+		t.Fatalf("bottom content must meet canvas bottom: (%v,%v)", x, y)
 	}
 	x, y = placementCenter(psx.RenderRequest{Fit: "auto", NoCrop: true, OffsetX: 0.3, OffsetY: 0.2}, 100, 200, 100, 160)
 	if x != 50 || y != 120 {
 		t.Fatalf("no_crop must limit offsets: (%v,%v)", x, y)
+	}
+}
+
+func TestCoverFineTuningCannotExposeEmptyBorders(t *testing.T) {
+	for _, size := range [][2]float64{{120, 240}, {100, 200}} {
+		x, y := placementCenter(psx.RenderRequest{Fit: "cover", OffsetX: .3, OffsetY: .2}, 100, 200, size[0], size[1])
+		if x-size[0]/2 > 0 || x+size[0]/2 < 100 || y-size[1]/2 > 0 || y+size[1]/2 < 200 {
+			t.Fatalf("cover exposed an edge: center=(%v,%v) size=%v", x, y, size)
+		}
 	}
 }
 

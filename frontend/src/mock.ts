@@ -36,6 +36,7 @@ const CONFIG = {
   base_url: 'https://example.invalid/v1',
   api_key: mockKey,
   model: 'demo-vision-model',
+  tune_model: 'deepseek-v4.1-flash',
   max_tokens: 4000,
   timeout_seconds: 180,
   temperature: 0.1,
