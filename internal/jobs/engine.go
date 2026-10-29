@@ -975,7 +975,9 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 
 	// 1) 图案规范化：去 dpi + 可选裁透明留白
 	patPath := filepath.Join(tmp, "pat.png")
-	pr, err := imgutil.Normalize(t.Pattern, patPath, opt.TrimAlpha)
+	fullBleed := opt.Auto && fitIsContainLike(opt.Fit)
+	// 自动铺放保留原画布中的透明留白，避免把原构图重新裁成独立贴纸。
+	pr, err := imgutil.Normalize(t.Pattern, patPath, opt.TrimAlpha && !fullBleed)
 	if err != nil {
 		e.failTask(t, fmt.Errorf("规范化图案: %w", err))
 		return
@@ -987,25 +989,10 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	}
 
 	referencePath := patPath
-	fullBleed := opt.Auto && fitIsContainLike(opt.Fit) && pr.FullBackground
 	renderFit := opt.Fit
 	if fullBleed {
 		renderFit = psx.FitCover
-		e.logf("dim", "  原图无透明底：按原比例直接满铺，仅检查主要内容遮挡")
-	}
-	fillTop := opt.Auto && opt.NoCrop && fitIsContainLike(opt.Fit) && t.FillTop && !fullBleed
-	if fillTop {
-		extended := filepath.Join(tmp, "background.png")
-		extra, err := imgutil.ExtendBackgroundTop(patPath, extended)
-		if err != nil {
-			e.failTask(t, fmt.Errorf("顶部续铺: %w", err))
-			return
-		}
-		fillTop = extra > 0
-		if fillTop {
-			patPath = extended
-			e.logf("info", "  满版背景顶部续铺 %dpx，原图像素保留", extra)
-		}
+		e.logf("dim", "  按原画布等比满铺，保留透明度与原构图，仅检查主要内容问题")
 	}
 	// 2) 多轮参数微调
 	//    完整放下时先按原比例居中渲染，只在评审发现主要内容问题时重渲，
@@ -1014,7 +1001,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	tc := tuner.Config(jc)
 	reviewOn := opt.Auto && def.AutoTuneOn
 	alignBottom := pr.BottomContent && fitIsContainLike(renderFit)
-	placement := judge.Placement{Fit: renderFit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, FillTop: fillTop, AlignBottom: alignBottom, FullBleed: fullBleed}
+	placement := judge.Placement{Fit: renderFit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, AlignBottom: alignBottom, FullBleed: fullBleed}
 	if alignBottom {
 		e.logf("dim", "  原图底部有内容：按原比例贴合壳底")
 	}
@@ -1052,7 +1039,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		e.logf("dim", "  禁止裁切：实际候选档位 %v", scales)
 	}
 	offX, offY := opt.OffsetX, opt.OffsetY
-	if fillTop || fullBleed {
+	if fullBleed {
 		scales = []float64{1}
 		offX, offY = 0, 0
 		placement.OffsetX, placement.OffsetY = 0, 0
@@ -1212,7 +1199,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			}
 			bestScale, bestScore, bestNote = chosenScale, adv.Score, chosenNote
 		}
-		if round >= rounds || fillTop {
+		if round >= rounds {
 			e.logf("info", "  最终评审 %d 分：%s（合格=%t）", adv.Score, adv.Problem, reviewGood)
 			break
 		}

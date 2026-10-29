@@ -37,7 +37,6 @@ func TestLiveFullMockups(t *testing.T) {
 		}
 		settings.TuneAPIKey = string(key)
 	}
-	settings.PrecheckOn, settings.PrecheckSkip = true, true
 	var cases struct {
 		Patterns []struct {
 			Path   string `json:"path"`

@@ -15,12 +15,11 @@ func TestNormalizeBottomContentUsesOriginalCanvas(t *testing.T) {
 		name string
 		box  image.Rectangle
 		want bool
-		full bool
 	}{
-		{"floating logo", image.Rect(20, 30, 80, 70), false, false},
-		{"bottom ground", image.Rect(10, 50, 90, 100), true, false},
-		{"transparent last row", image.Rect(10, 50, 90, 99), false, false},
-		{"full background", image.Rect(0, 0, 100, 100), true, true},
+		{"floating logo", image.Rect(20, 30, 80, 70), false},
+		{"bottom ground", image.Rect(10, 50, 90, 100), true},
+		{"transparent last row", image.Rect(10, 50, 90, 99), false},
+		{"full background", image.Rect(0, 0, 100, 100), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			im := image.NewNRGBA(image.Rect(0, 0, 100, 100))
@@ -42,9 +41,6 @@ func TestNormalizeBottomContentUsesOriginalCanvas(t *testing.T) {
 			}
 			if res.BottomContent != tc.want {
 				t.Fatalf("BottomContent=%v want=%t", res.BottomContent, tc.want)
-			}
-			if res.FullBackground != tc.full {
-				t.Fatalf("FullBackground=%t want=%t", res.FullBackground, tc.full)
 			}
 		})
 	}

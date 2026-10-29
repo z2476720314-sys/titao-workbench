@@ -23,7 +23,8 @@ import (
 
 type backgroundEditor struct {
 	reviewPhotoshop
-	size image.Point
+	size        image.Point
+	cornerAlpha uint32
 }
 
 func (p *backgroundEditor) Render(r psx.RenderRequest) (string, error) {
@@ -32,24 +33,27 @@ func (p *backgroundEditor) Render(r psx.RenderRequest) (string, error) {
 		return "", err
 	}
 	p.size = im.Bounds().Size()
+	_, _, _, p.cornerAlpha = im.At(0, 0).RGBA()
 	return p.reviewPhotoshop.Render(r)
 }
 
-func TestOpaqueBackgroundStartsFullAndOnlyFineTunesRealIssues(t *testing.T) {
+func TestAutoStartsFullOnOriginalCanvasRegardlessOfTransparency(t *testing.T) {
 	for _, tc := range []struct {
 		height    int
 		direction string
 		calls     int
-	}{{70, "smaller", 1}, {90, "smaller", 1}, {70, "right", 2}} {
+		alpha     uint8
+		inset     int
+	}{{70, "smaller", 1, 255, 0}, {90, "smaller", 1, 255, 0}, {70, "right", 2, 255, 0}, {70, "smaller", 1, 150, 0}, {90, "smaller", 1, 255, 10}} {
 		height := tc.height
-		t.Run(strconv.Itoa(height)+tc.direction, func(t *testing.T) {
+		t.Run(strconv.Itoa(height)+tc.direction+strconv.Itoa(int(tc.alpha)), func(t *testing.T) {
 			e, _, _ := newTestEngine(t)
 			editor := &backgroundEditor{}
 			e.ps = editor
 			dir := t.TempDir()
 			path := filepath.Join(dir, "pattern.png")
 			im := image.NewNRGBA(image.Rect(0, 0, 40, height))
-			draw.Draw(im, im.Bounds(), image.NewUniform(color.NRGBA{20, 100, 190, 255}), image.Point{}, draw.Src)
+			draw.Draw(im, im.Bounds().Inset(tc.inset), image.NewUniform(color.NRGBA{20, 100, 190, tc.alpha}), image.Point{}, draw.Src)
 			f, err := os.Create(path)
 			if err != nil {
 				t.Fatal(err)
@@ -70,10 +74,17 @@ func TestOpaqueBackgroundStartsFullAndOnlyFineTunesRealIssues(t *testing.T) {
 			defer srv.Close()
 			settings := cfg.Default()
 			task := &Task{ID: 1, Pattern: path, PatternName: "background", Template: tpl, TemplateName: "template", FillTop: true}
-			opt := Options{Auto: true, NoCrop: true, Fit: "auto", Scales: settings.Candidates, CellSize: 80, JPGQuality: 90}
+			opt := Options{Auto: true, NoCrop: true, Fit: "auto", TrimAlpha: true, Scales: settings.Candidates, CellSize: 80, JPGQuality: 90}
 			e.processOne(context.Background(), opt, settings, judge.Config{BaseURL: srv.URL, APIKey: "dummy", Model: "test", MaxTokens: 100, Timeout: time.Second}, task, filepath.Join(dir, "out"), 1, 1)
 			if task.Phase != PhaseDone || editor.size != image.Pt(40, height) || len(editor.requests) != tc.calls || editor.requests[0].Fit != "cover" || len(editor.requests[0].Scales) != 1 || calls != tc.calls {
 				t.Fatalf("background flow: phase=%s size=%v renders=%d calls=%d", task.Phase, editor.size, len(editor.requests), calls)
+			}
+			wantAlpha := uint32(tc.alpha) * 257
+			if tc.inset > 0 {
+				wantAlpha = 0
+			}
+			if editor.cornerAlpha != wantAlpha {
+				t.Fatalf("original alpha changed: %d want %d", editor.cornerAlpha, wantAlpha)
 			}
 		})
 	}

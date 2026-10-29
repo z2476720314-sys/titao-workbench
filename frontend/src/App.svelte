@@ -701,7 +701,7 @@
   }
 
   const FIT_OPTS = [
-    { v: 'auto', label: 'auto · 自动摆放（推荐）', hint: '无透明底满铺；透明图案按原构图贴底或居中' },
+    { v: 'auto', label: 'auto · 原画布满铺（推荐）', hint: '保留透明度和原构图，先满铺再检查主体' },
     { v: 'contain', label: 'contain · 完整放下', hint: '同 auto，显式指定' },
     { v: 'cover', label: 'cover · 铺满', hint: '以铺满为基准' },
     { v: 'stretch', label: 'stretch · 拉伸变形', hint: '不保持宽高比' },
@@ -927,7 +927,7 @@
               <span style="color:var(--text);font-size:12px">视觉模型自动判断图案大小</span>
             </label>
             <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-              无透明底直接满铺；透明图案底部有内容则贴底，独立图案居中。主要内容完整且无明显遮挡就通过。
+              所有图案先按原画布等比满铺，保留透明度和原构图；主要内容确有问题才微调。
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
@@ -968,7 +968,7 @@
                 <span class="lbl">最大迭代轮数</span>
                 <input type="number" min="1" max="3" bind:value={maxRounds} />
                 <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-                  1 = 只选档不微调；2~3 = 按评审建议再调几轮。轮数越多越慢。
+                  1 = 一轮评审；2~3 = 主要内容确有问题时继续微调。
                 </div>
               </div>
             </div>
@@ -1000,17 +1000,17 @@
                 <span style="color:var(--text);font-size:12px">图案必须完整可见（不裁切）</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                透明主体完整保留；无透明底的整幅背景仍按比例满铺，边缘背景可能略裁。
+                自动满铺可略裁边缘背景，主要内容不完整会提示复核；手动完整放下时限制放大。
               </div>
             </div>
 
             <div class="field" style="margin-bottom:0">
               <label class="check-row">
-                <input type="checkbox" bind:checked={trimAlpha} />
-                <span style="color:var(--text);font-size:12px">裁掉图案四周透明留白</span>
+                <input type="checkbox" bind:checked={trimAlpha} disabled={auto && (fit === 'auto' || fit === 'contain')} />
+                <span style="color:var(--text);font-size:12px">手动模式裁掉图案透明留白</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                开启后图案真正居中且尺寸准确；关闭则保留原始画布位置。
+                自动满铺保留原图画布及主体位置；手动模式可裁掉四周透明留白。
               </div>
             </div>
           </div>
@@ -1707,7 +1707,7 @@
             <div class="field" style="margin-bottom:0">
               <label class="check-row">
                 <input type="checkbox" bind:checked={conf.trim_alpha} />
-                <span style="color:var(--text);font-size:12px">默认裁掉图案透明留白</span>
+                <span style="color:var(--text);font-size:12px">手动模式默认裁掉透明留白</span>
               </label>
             </div>
             <div class="field" style="margin-bottom:0">
@@ -1813,7 +1813,7 @@
           <li>模板 TIF 复制到临时目录，<b>原文件永不打开或修改</b>。</li>
           <li>进入「插画」组里每个智能对象内部的 PSB，隐藏原有图层后置入图案并居中。</li>
           <li>多个格子共享同一个 PSB 源时只替换一次，关联格一起更新（同款图案的不同手持角度）。</li>
-          <li>无透明底直接满铺；透明图案底部有内容则贴底，独立图案居中。主要内容无明显遮挡就通过。</li>
+          <li>所有图案先按原画布等比满铺，保留透明度和原构图；主要内容有实际问题才微调。</li>
           <li>按每 <span class="mono">{cellSize}px</span> 一格切格，导出高质量 JPG。</li>
         </ol>
       </section>

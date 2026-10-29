@@ -33,8 +33,7 @@ type PatternResult struct {
 	// OrigWidth / OrigHeight 是原图尺寸。
 	OrigWidth, OrigHeight int
 	// BottomContent is measured before trimming so floating logos stay centered.
-	BottomContent  bool
-	FullBackground bool
+	BottomContent bool
 }
 
 // Rect 是矩形区域。
@@ -83,17 +82,6 @@ func Normalize(src, dst string, trim bool) (PatternResult, error) {
 
 	// 统一转成 NRGBA（带 alpha），便于裁边和后续处理
 	rgba := toNRGBA(img)
-	solidPixels := 0
-	for y := rgba.Bounds().Min.Y; y < rgba.Bounds().Max.Y; y++ {
-		for x := rgba.Bounds().Min.X; x < rgba.Bounds().Max.X; x++ {
-			if rgba.NRGBAAt(x, y).A >= 250 {
-				solidPixels++
-			}
-		}
-	}
-	// Allow only sparse antialiased edge pixels in an otherwise opaque background.
-	totalPixels := rgba.Bounds().Dx() * rgba.Bounds().Dy()
-	res.FullBackground = solidPixels >= totalPixels-totalPixels/200
 	band := max(1, (rgba.Bounds().Dy()+99)/100)
 	bottomPixels := 0
 	for y := rgba.Bounds().Max.Y - band; y < rgba.Bounds().Max.Y; y++ {

@@ -88,7 +88,7 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 			t.Error(err)
 		}
 		requests = append(requests, body)
-		content := `{"good":false,"score":70,"problem":"偏大","direction":"smaller","step":0.1}`
+		content := `{"good":false,"score":70,"problem":"主要内容偏位","direction":"right","step":0.1}`
 		if len(requests) == 2 {
 			content = `{"good":true,"score":91,"problem":"无","direction":"none","step":0.05}`
 			if finalFailure {
@@ -114,10 +114,7 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 	if fmt.Sprint(ps.requests[0].Scales) != fmt.Sprint(want) {
 		t.Errorf("actual candidates = %v; want %v", ps.requests[0].Scales, want)
 	}
-	wantScale := 0.9
-	if finalFailure {
-		wantScale = 1
-	}
+	wantScale := 1.0
 	if task.ChosenScale != wantScale {
 		t.Errorf("chosen scale = %v; want %v", task.ChosenScale, wantScale)
 	}
@@ -130,7 +127,11 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 		if !strings.Contains(text, "原图") || !strings.Contains(text, "no_crop=true") {
 			t.Errorf("request %d missing source/policy context", i)
 		}
-		if !strings.Contains(text, "offset_x=0.020") || !strings.Contains(text, "offset_y=0.010") || strings.Contains(text, "scale=0.000") {
+		wantOffset := "offset_x=0.000"
+		if i > 0 {
+			wantOffset = "offset_x=0.100"
+		}
+		if !strings.Contains(text, wantOffset) || !strings.Contains(text, "offset_y=0.000") || strings.Contains(text, "scale=0.000") {
 			t.Errorf("request %d has incorrect actual parameters", i)
 		}
 		wantImages := 2

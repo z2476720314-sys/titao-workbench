@@ -159,7 +159,6 @@ export namespace imgutil {
 	    OrigWidth: number;
 	    OrigHeight: number;
 	    BottomContent: boolean;
-	    FullBackground: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new PatternResult(source);
@@ -175,7 +174,6 @@ export namespace imgutil {
 	        this.OrigWidth = source["OrigWidth"];
 	        this.OrigHeight = source["OrigHeight"];
 	        this.BottomContent = source["BottomContent"];
-	        this.FullBackground = source["FullBackground"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
