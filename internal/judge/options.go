@@ -30,6 +30,10 @@ func ApplyThinking(body map[string]any, model string, enabled bool) {
 			mode = "enabled"
 		}
 		body["thinking"] = map[string]string{"type": mode}
+		if !enabled {
+			// Some relays keep reasoning enabled despite the native switch.
+			body["reasoning_effort"] = "low"
+		}
 	}
 }
 

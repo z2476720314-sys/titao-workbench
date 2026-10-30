@@ -9,21 +9,20 @@
 //   - tuner 在**单张成品上**做绝对评审，指出还差什么、该往哪调。
 //
 // 实测教训（沿用 judge 的结论）：
-//   - 结论可能只出现在 reasoning_content 而 content 为空，两处都要找；
+//   - 优先解析最终 content，兼容只在 reasoning_content 返回完整结论的接口；
 //   - 必须 enable_thinking=false，否则思考链把 token 烧光、content 返回空串；
 //   - 送整条长图会看不清，只送单格裁切图。
 package tuner
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -93,14 +92,6 @@ const promptTemplate = `你是手机壳商品图评审。下面这一张是「�
 - direction：只有主要人物、文字或标志明显裁切、遮挡、方向或位置错误才调整；关键主体被镜头遮挡用 avoid_cam，明显裁切用 smaller，主要内容明显偏离中心才用 up/down/left/right。底部确有需要接壳底的内容且悬空时允许小幅 down；正常留白或细微不对称一律 good=true、direction=none。
 - step：调整幅度，问题明显用 0.2，问题轻微用 0.05。`
 
-var (
-	reGood      = regexp.MustCompile(`"good"\s*:\s*(true|false)`)
-	reScore     = regexp.MustCompile(`"score"\s*:\s*(\d{1,3})`)
-	reProblem   = regexp.MustCompile(`"problem"\s*:\s*"([^"]*)"`)
-	reDirection = regexp.MustCompile(`"direction"\s*:\s*"([a-z_]+)"`)
-	reStep      = regexp.MustCompile(`"step"\s*:\s*([0-9]*\.?[0-9]+)`)
-)
-
 // 合法的 direction 取值集合，模型乱写时用来收敛。
 var validDirs = map[string]bool{
 	DirNone: true, DirBigger: true, DirSmaller: true,
@@ -109,12 +100,11 @@ var validDirs = map[string]bool{
 
 // Critique 让视觉模型评审一张成品图（单格 JPEG），返回调整建议。
 //
-// 网络或解析失败时停止迭代并置 Fallback，结果仍需人工复核。
+// 格式不完整时在原时限内重评一次；仍失败则置 Fallback，保留人工复核。
 func Critique(cfg Config, jpeg []byte, placement judge.Placement) Advice {
 	if len(jpeg) == 0 {
 		return fallback(fmt.Errorf("没有成品图"))
 	}
-
 	text := promptTemplate + "\n" + placement.Description()
 	if placement.SourceDataURL != "" {
 		text += "\n第一张附图是原图案参考，第二张才是本轮套图成品，只给成品评分。"
@@ -123,108 +113,120 @@ func Critique(cfg Config, jpeg []byte, placement judge.Placement) Advice {
 	if placement.SourceDataURL != "" {
 		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": placement.SourceDataURL}})
 	}
-	content = append(content, map[string]any{
-		"type": "image_url",
-		"image_url": map[string]any{
-			"url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpeg),
-		},
-	})
-
-	body := map[string]any{
-		"model":       cfg.Model,
-		"messages":    []any{map[string]any{"role": "user", "content": content}},
-		"max_tokens":  cfg.MaxTokens,
-		"temperature": cfg.Temperature,
+	content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{
+		"url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpeg),
+	}})
+	messages := []any{
+		map[string]any{"role": "system", "content": "只输出最终评审 JSON 对象，不输出分析、推理或 Markdown。字段必须包含 good(boolean)、score(0至100的整数)、problem(string)、direction(从 none/bigger/smaller/up/down/left/right/avoid_cam 中选一个)、step(number)。必须根据图片评审，不能因输出格式问题推断图片合格。"},
+		map[string]any{"role": "user", "content": content},
 	}
+	body := map[string]any{"model": cfg.Model, "messages": messages, "max_tokens": cfg.MaxTokens, "temperature": cfg.Temperature}
 	judge.ApplyThinking(body, cfg.Model, cfg.Thinking)
 	judge.ApplyJSONResponse(body, cfg.Model)
-
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return fallback(err)
-	}
-
-	url := strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return fallback(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	req.Header.Set("Content-Type", "application/json")
 
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 180 * time.Second
 	}
-	resp, err := judge.DoVisionRequest(req, timeout)
-	if err != nil {
-		return fallback(err)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	issue := "模型未返回完整有效的评审 JSON"
+	for attempt := 0; attempt < 2; attempt++ {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return fallback(err)
+		}
+		url := strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+		if err != nil {
+			return fallback(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := judge.DoVisionRequest(req, timeout)
+		if err != nil {
+			return fallback(err)
+		}
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if err != nil {
+			return fallback(err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fallback(fmt.Errorf("HTTP %d: %.300s", resp.StatusCode, raw))
+		}
+		var parsed struct {
+			Choices []struct {
+				FinishReason string `json:"finish_reason"`
+				Message      struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			return fallback(fmt.Errorf("解析响应: %w", err))
+		}
+		if len(parsed.Choices) == 0 {
+			return fallback(fmt.Errorf("响应无 choices"))
+		}
+		reply := parsed.Choices[0]
+		var adv Advice
+		issue = "模型未返回完整有效的评审 JSON"
+		if reply.FinishReason == "length" {
+			issue = "模型输出达到长度上限，评审结果被截断"
+		} else {
+			adv = parseAdvice(reply.Message.Content)
+			if adv.Direction == "" && strings.TrimSpace(reply.Message.Content) == "" {
+				reasoning := strings.TrimSpace(reply.Message.ReasoningContent)
+				for _, prefix := range []string{"结论：", "结论:"} {
+					reasoning = strings.TrimSpace(strings.TrimPrefix(reasoning, prefix))
+				}
+				adv = parseAdvice(reasoning)
+			}
+		}
+		if adv.Direction != "" {
+			adv.Raw = strings.TrimSpace(reply.Message.Content)
+			return adv
+		}
+		if attempt == 0 {
+			// Reassess the same images once; never manufacture advice from partial analysis.
+			body["messages"] = append(messages, map[string]any{"role": "user", "content": "上次响应没有完整有效的评审结果。请重新查看所附原图和成品，直接返回最终 JSON，包含全部字段并选择一个合法 direction。不要输出分析、复述要求或从格式错误推断图像质量。"})
+		}
 	}
-	defer resp.Body.Close()
-
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fallback(fmt.Errorf("HTTP %d: %.300s", resp.StatusCode, raw))
-	}
-
-	var parsed struct {
-		Choices []struct {
-			Message struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return fallback(fmt.Errorf("解析响应: %w", err))
-	}
-	if len(parsed.Choices) == 0 {
-		return fallback(fmt.Errorf("响应无 choices"))
-	}
-
-	msg := parsed.Choices[0].Message
-	// 结论可能落在 reasoning_content 里而 content 为空，两处一起找
-	blob := msg.Content + "\n" + msg.ReasoningContent
-
-	adv := parseAdvice(blob)
-	adv.Raw = strings.TrimSpace(msg.Content)
-	if adv.Direction == "" {
-		return fallback(fmt.Errorf("模型输出里没有可识别的 direction: %.200s", blob))
-	}
-	return adv
+	return fallback(fmt.Errorf("%s；格式重试后仍未确认，请人工复核", issue))
 }
 
 // parseAdvice 从模型输出里抽出结构化建议。抽不到字段时留零值，由调用方判断。
 func parseAdvice(blob string) Advice {
-	var adv Advice
-
-	if m := reGood.FindStringSubmatch(blob); m != nil {
-		adv.Good = m[1] == "true"
-	}
-	if m := reScore.FindStringSubmatch(blob); m != nil {
-		if n, err := strconv.Atoi(m[1]); err == nil && n >= 0 && n <= 100 {
-			adv.Score = n
+	blob = strings.TrimSpace(blob)
+	if strings.HasPrefix(blob, "```") {
+		header, content, ok := strings.Cut(blob, "\n")
+		if !ok || (header != "```" && !strings.EqualFold(strings.TrimSpace(header), "```json")) || !strings.HasSuffix(content, "```") {
+			return Advice{}
 		}
+		blob = strings.TrimSpace(strings.TrimSuffix(content, "```"))
 	}
-	if m := reProblem.FindStringSubmatch(blob); m != nil {
-		adv.Problem = strings.TrimSpace(m[1])
+	var result struct {
+		Good      *bool   `json:"good"`
+		Score     *int    `json:"score"`
+		Problem   string  `json:"problem"`
+		Direction string  `json:"direction"`
+		Step      float64 `json:"step"`
 	}
-	if m := reDirection.FindStringSubmatch(blob); m != nil {
-		if validDirs[m[1]] {
-			adv.Direction = m[1]
-		}
+	if json.Unmarshal([]byte(blob), &result) != nil ||
+		result.Score == nil || *result.Score < 0 || *result.Score > 100 ||
+		!validDirs[result.Direction] {
+		return Advice{}
 	}
-	if m := reStep.FindStringSubmatch(blob); m != nil {
-		if v, err := strconv.ParseFloat(m[1], 64); err == nil {
-			adv.Step = clampStep(v)
-		}
+	adv := Advice{Score: *result.Score, Problem: strings.TrimSpace(result.Problem), Direction: result.Direction, Step: 0.1}
+	if result.Step != 0 {
+		adv.Step = clampStep(result.Step)
 	}
-	if adv.Step == 0 {
-		adv.Step = 0.1
-	}
-	// 只给了分数没给 good 时，用分数兜底
-	if !reGood.MatchString(blob) && adv.Score >= 85 && adv.Direction == DirNone {
-		adv.Good = true
+	if result.Good != nil {
+		adv.Good = *result.Good
+	} else {
+		adv.Good = adv.Score >= 85 && adv.Direction == DirNone
 	}
 	return adv
 }

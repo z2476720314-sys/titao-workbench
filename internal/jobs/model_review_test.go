@@ -91,9 +91,9 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 		content := `{"good":false,"score":70,"problem":"主要内容偏位","direction":"right","step":0.1}`
 		if len(requests) == 2 {
 			content = `{"good":true,"score":91,"problem":"无","direction":"none","step":0.05}`
-			if finalFailure {
-				content = "invalid response"
-			}
+		}
+		if finalFailure && len(requests) >= 2 {
+			content = "invalid response"
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})
 	}))
@@ -118,11 +118,27 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 	if task.ChosenScale != wantScale {
 		t.Errorf("chosen scale = %v; want %v", task.ChosenScale, wantScale)
 	}
-	if len(requests) != 2 {
+	wantCalls := 2
+	if finalFailure {
+		wantCalls = 3
+	}
+	if len(requests) != wantCalls {
 		t.Fatalf("model calls = %d; final render must also be reviewed", len(requests))
 	}
 	for i, body := range requests {
-		content := body["messages"].([]any)[0].(map[string]any)["content"].([]any)
+		var content []any
+		for _, message := range body["messages"].([]any) {
+			m := message.(map[string]any)
+			if m["role"] == "user" {
+				if parts, ok := m["content"].([]any); ok {
+					content = parts
+					break
+				}
+			}
+		}
+		if len(content) == 0 {
+			t.Fatal("review lost the image message")
+		}
 		text := content[0].(map[string]any)["text"].(string)
 		if !strings.Contains(text, "原图") || !strings.Contains(text, "no_crop=true") {
 			t.Errorf("request %d missing source/policy context", i)
