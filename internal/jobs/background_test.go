@@ -44,7 +44,7 @@ func TestAutoStartsFullOnOriginalCanvasRegardlessOfTransparency(t *testing.T) {
 		calls     int
 		alpha     uint8
 		inset     int
-	}{{70, "smaller", 1, 255, 0}, {90, "smaller", 1, 255, 0}, {70, "right", 2, 255, 0}, {70, "smaller", 1, 150, 0}, {90, "smaller", 1, 255, 10}} {
+	}{{70, "smaller", 1, 255, 0}, {90, "smaller", 1, 255, 0}, {70, "right", 2, 255, 0}, {70, "smaller", 1, 150, 0}, {90, "smaller", 2, 255, 10}} {
 		height := tc.height
 		t.Run(strconv.Itoa(height)+tc.direction+strconv.Itoa(int(tc.alpha)), func(t *testing.T) {
 			e, _, _ := newTestEngine(t)

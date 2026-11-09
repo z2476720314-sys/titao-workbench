@@ -42,6 +42,10 @@ type RenderRequest struct {
 	NoCrop bool
 	// AlignBottom preserves artwork that reaches the original canvas bottom.
 	AlignBottom bool
+	// ContentBounds permits automatic placement within transparent canvas margins.
+	// Coordinates are normalized; zero keeps the existing whole-canvas constraints.
+	ContentBounds    [4]float64
+	AnchorX, AnchorY int
 	// PSVersion 是 Photoshop 版本号，用于版本自适应能力校验。
 	//
 	// 留空时由 Render 从当前会话实时读取（每次渲染多一次 COM 属性读取），
@@ -297,6 +301,8 @@ const jsxRender = `(function(){
               // 再放大就横向裁掉设计元素）。改成 s0 后 auto 天然不裁切。
               var FIT = "__FIT__";
               var NOCROP = __NOCROP__;
+              var CB = __CONTENT_BOUNDS__;
+              var contentBounds = CB[2] > CB[0] && CB[3] > CB[1];
               var s0 = Math.min(cw / pw, ch / ph);
               var s1 = Math.max(cw / pw, ch / ph);
               var sx, sy;
@@ -304,8 +310,14 @@ const jsxRender = `(function(){
               else if (FIT == "none")    { sx = sy = T; }
               else if (FIT == "cover")   { sx = sy = s1 * T; }
               else                       { sx = sy = s0 * T; }   // auto / contain
+              if (__AX__ == 2 && contentBounds) sx = sy = cw / (pw * (CB[2] - CB[0]));
+              if (NOCROP && contentBounds && FIT != "stretch") {
+                var visibleLimit = Math.min(cw / (pw * (CB[2] - CB[0])), ch / (ph * (CB[3] - CB[1])));
+                if (__AX__ == 2 && sx > visibleLimit + 1e-9) throw new Error("图案比例无法同时满足左右贴边与内容不裁切");
+                sx = sy = (__AX__ == 2) ? Math.min(sx, visibleLimit) : Math.min(Math.min(sx / T, visibleLimit) * T, visibleLimit);
+              }
               // 不裁切上限：T 超过 1 就必然有方向被壳边裁掉。
-              if (NOCROP && FIT != "stretch" && FIT != "cover" && (sx > s0 || sy > s0)) {
+              if (NOCROP && !contentBounds && FIT != "stretch" && FIT != "cover" && (sx > s0 || sy > s0)) {
                 sx = sy = s0;
               }
               nl.resize(sx * 100, sy * 100, AnchorPosition.MIDDLECENTER);
@@ -315,11 +327,21 @@ const jsxRender = `(function(){
               var nw = b2[2].as("px") - b2[0].as("px"), nh = b2[3].as("px") - b2[1].as("px");
               var tx = (cw - nw) / 2 + cw * OFX;
               var ty = (__BOTTOM__ ? ch - nh : (ch - nh) / 2) + ch * OFY;
-              if (FIT == "cover") {
+              if (contentBounds && FIT != "stretch") {
+                var AX = __AX__, AY = __AY__;
+                if (AX < 0) tx = -nw * CB[0];
+                if (AX > 0) tx = cw - nw * CB[2];
+                if (AY < 0) ty = -nh * CB[1];
+                if (AY > 0) ty = ch - nh * CB[3];
+              }
+              if (contentBounds && NOCROP && FIT != "stretch") {
+                tx = Math.max(-nw * CB[0], Math.min(cw - nw * CB[2], tx));
+                ty = Math.max(-nh * CB[1], Math.min(ch - nh * CB[3], ty));
+              } else if (!contentBounds && FIT == "cover") {
                 if (nw >= cw) tx = Math.max(cw - nw, Math.min(0, tx));
                 if (nh >= ch) ty = Math.max(ch - nh, Math.min(0, ty));
               }
-              if (NOCROP && FIT != "stretch" && FIT != "cover") {
+			  if (NOCROP && !contentBounds && FIT != "stretch" && FIT != "cover") {
                 tx = Math.max(0, Math.min(cw - nw, tx));
                 ty = Math.max(0, Math.min(ch - nh, ty));
               }
@@ -390,6 +412,10 @@ func (s *Session) Render(req RenderRequest) (string, error) {
 	jsx = strings.ReplaceAll(jsx, "__OFY__", fmt.Sprintf("%g", req.OffsetY))
 	jsx = strings.ReplaceAll(jsx, "__OUTDIR__", escapePath(req.OutDir))
 	jsx = strings.ReplaceAll(jsx, "__NOCROP__", fmt.Sprintf("%t", req.NoCrop))
+	bounds, _ := json.Marshal(req.ContentBounds)
+	jsx = strings.ReplaceAll(jsx, "__CONTENT_BOUNDS__", string(bounds))
+	jsx = strings.ReplaceAll(jsx, "__AX__", fmt.Sprintf("%d", req.AnchorX))
+	jsx = strings.ReplaceAll(jsx, "__AY__", fmt.Sprintf("%d", req.AnchorY))
 	bottom := req.AlignBottom && (req.Fit == "" || req.Fit == FitAuto || req.Fit == FitContain)
 	jsx = strings.ReplaceAll(jsx, "__BOTTOM__", fmt.Sprintf("%t", bottom))
 

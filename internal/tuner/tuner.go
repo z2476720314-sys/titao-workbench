@@ -73,24 +73,20 @@ const (
 	DirAvoidCame = "avoid_cam" // 压到摄像头，需要缩放或位移避让
 )
 
-const promptTemplate = `你是手机壳商品图评审。下面这一张是「图案已经套在手机壳上」的成品图（只截取了其中一个格子）。
+const promptTemplate = `你是手机壳印刷摆放检查员。附图第一张是原图案，后面是同一摆放的多个成品角度。逐张对照，不能只看整体好不好看。
 
-只检查主要内容是否完整、居中且无明显遮挡；满足就返回 good=true、direction=none，结束微调。不要为了更饱满或细微视觉偏好调整。
+按顺序核对三件事：
+1. 原图里的动物/人物头顶、耳朵、脸部轮廓，在成品中是否被镜头吞掉；原图可见的成行文字、字母，在成品中是否藏进镜头下面。头部轮廓和成行文字都是主要内容，不能当作允许遮挡的背景装饰。手指自然遮挡小局部可接受，镜头吞掉头部或文字不可接受。
+2. 图案底部若是明显被原画布截断的横边，是否在壳底上方悬空。此类横边应下移接壳底。完整的独立标志或贴纸不强制贴底。
+3. 比例、方向、透明区域、壳色、镜头和手部是否保留；不能镜像、拉伸或把透明区域印成白色。
+4. 图案若有明显直线截断边，须贴住对应壳边，不能在壳面内部悬空。已有贴边锚点在缩放后仍须保持；自然弧形轮廓不强制贴边。
 
-评审标准：
-1. 对照原图案保护主体、比例、方向、透明区域与细节。透明区域在参考中铺白底，不代表要印白底。独立文字、数字、标志或悬浮贴纸保持居中，不能仅因底部空隙下移；只有原图底部有应衔接壳底的连续背景、地面或被画布截断的实质内容，而且成品出现悬空截边时，才允许小幅 down 贴合壳底，不改变大小、不裁切主体。
-2. 默认按实际 fit、scale=1 和零偏移铺放。原画布中的透明区域、半透明像素、主体位置和装饰分布都是原构图，不构成偏小或偏移；主要内容完整且无明显遮挡时直接通过，不能因看到透明而缩小整图。
-3. 镜头、边框、手指自然遮挡背景装饰是正常的，不能为躲开整个镜头区而把整幅图缩小。关键人物脸部或文字被遮挡才使用 avoid_cam。
-4. 壳体方向倒置时图案也应倒置，不得镜像或非等比拉伸；保持原壳色、几何与光影。
-5. 图案必须贴合印刷背板，不能覆盖镜头、壳边或手指。根据实际 scale、fit 和偏移判断下一步是否能执行。
+只要任一角度存在以上主要问题，good=false，problem必须写出具体缺失，例如“猫头被镜头挡住”“上方文字被挡”“底部截边悬空”。不要用“原构图居中”或“自然遮挡”放行。
+有透明留白且镜头遮挡时，先用 down 下移；余量不足再用 avoid_cam 等比缩小并下移。明显裁切用 smaller。保留已完整可见的主体。连续满版背景遵守附加实际参数，不为正常背景留白缩小。
 
-按下面格式只输出一行 JSON，不要任何解释：
-{"good": true/false, "score": 0-100, "problem": "主要问题10字内，没有就写无", "direction": "none|bigger|smaller|up|down|left|right|avoid_cam", "step": 0.05~0.3}
-
-字段说明：
-- good：这张是否已经够好、可以直接上架。score>=85 时一般填 true。
-- direction：只有主要人物、文字或标志明显裁切、遮挡、方向或位置错误才调整；关键主体被镜头遮挡用 avoid_cam，明显裁切用 smaller，主要内容明显偏离中心才用 up/down/left/right。底部确有需要接壳底的内容且悬空时允许小幅 down；正常留白或细微不对称一律 good=true、direction=none。
-- step：调整幅度，问题明显用 0.2，问题轻微用 0.05。`
+只输出完整的一行 JSON：
+{"good":true/false,"score":0-100,"problem":"具体问题20字内，没有写无","direction":"none|bigger|smaller|up|down|left|right|avoid_cam","step":0.05~0.3}
+good=true 时 direction=none。发现文字或头部被镜头遮挡时不能返回 good=true。step是相对画布的调整幅度，明显问题用0.2，轻微问题用0.05。`
 
 // 合法的 direction 取值集合，模型乱写时用来收敛。
 var validDirs = map[string]bool{
@@ -101,13 +97,13 @@ var validDirs = map[string]bool{
 // Critique 让视觉模型评审一张成品图（单格 JPEG），返回调整建议。
 //
 // 格式不完整时在原时限内重评一次；仍失败则置 Fallback，保留人工复核。
-func Critique(cfg Config, jpeg []byte, placement judge.Placement) Advice {
+func Critique(cfg Config, jpeg []byte, placement judge.Placement, otherViews ...[]byte) Advice {
 	if len(jpeg) == 0 {
 		return fallback(fmt.Errorf("没有成品图"))
 	}
 	text := promptTemplate + "\n" + placement.Description()
 	if placement.SourceDataURL != "" {
-		text += "\n第一张附图是原图案参考，第二张才是本轮套图成品，只给成品评分。"
+		text += "\n第一张附图是原图案参考，其余附图才是本轮不同角度的套图成品，只给成品评分。"
 	}
 	content := []any{map[string]any{"type": "text", "text": text}}
 	if placement.SourceDataURL != "" {
@@ -116,6 +112,11 @@ func Critique(cfg Config, jpeg []byte, placement judge.Placement) Advice {
 	content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{
 		"url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpeg),
 	}})
+	for _, view := range otherViews {
+		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{
+			"url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(view),
+		}})
+	}
 	messages := []any{
 		map[string]any{"role": "system", "content": "只输出最终评审 JSON 对象，不输出分析、推理或 Markdown。字段必须包含 good(boolean)、score(0至100的整数)、problem(string)、direction(从 none/bigger/smaller/up/down/left/right/avoid_cam 中选一个)、step(number)。必须根据图片评审，不能因输出格式问题推断图片合格。"},
 		map[string]any{"role": "user", "content": content},

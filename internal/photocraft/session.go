@@ -219,6 +219,23 @@ func placementScale(req psx.RenderRequest, t float64, cw, ch, pw, ph int) (float
 	default:
 		x, y = s0*t, s0*t
 	}
+	if req.AnchorX == 2 && req.ContentBounds != [4]float64{} {
+		x = float64(cw) / (float64(pw) * (req.ContentBounds[2] - req.ContentBounds[0]))
+		y = x
+	}
+	if req.NoCrop && req.ContentBounds != [4]float64{} && req.Fit != psx.FitStretch {
+		b := req.ContentBounds
+		limit := math.Min(float64(cw)/(float64(pw)*(b[2]-b[0])), float64(ch)/(float64(ph)*(b[3]-b[1])))
+		if req.AnchorX == 2 {
+			if x > limit+1e-9 {
+				return 0, 0, fmt.Errorf("图案比例无法同时满足左右贴边与内容不裁切")
+			}
+			x, y = math.Min(x, limit), math.Min(y, limit)
+		} else {
+			x, y = math.Min(math.Min(x/t, limit)*t, limit), math.Min(math.Min(y/t, limit)*t, limit)
+		}
+		return x, y, nil
+	}
 	if req.NoCrop && req.Fit != psx.FitCover && req.Fit != psx.FitStretch && (x > s0 || y > s0) {
 		x, y = s0, s0
 	}
@@ -232,6 +249,26 @@ func placementCenter(req psx.RenderRequest, cw, ch int, w, h float64) (float64, 
 	}
 	x += float64(cw) * req.OffsetX
 	y += float64(ch) * req.OffsetY
+	if req.ContentBounds != [4]float64{} && req.Fit != psx.FitStretch {
+		b := req.ContentBounds
+		if req.AnchorX < 0 {
+			x = w/2 - w*b[0]
+		}
+		if req.AnchorX > 0 {
+			x = float64(cw) + w/2 - w*b[2]
+		}
+		if req.AnchorY < 0 {
+			y = h/2 - h*b[1]
+		}
+		if req.AnchorY > 0 {
+			y = float64(ch) + h/2 - h*b[3]
+		}
+		if req.NoCrop {
+			x = math.Max(w/2-w*b[0], math.Min(float64(cw)+w/2-w*b[2], x))
+			y = math.Max(h/2-h*b[1], math.Min(float64(ch)+h/2-h*b[3], y))
+		}
+		return x, y
+	}
 	if req.Fit == psx.FitCover {
 		if w >= float64(cw) {
 			x = math.Max(float64(cw)-w/2, math.Min(w/2, x))

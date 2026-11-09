@@ -150,7 +150,7 @@ func checkModelReview(t *testing.T, finalFailure bool) {
 		if !strings.Contains(text, wantOffset) || !strings.Contains(text, "offset_y=0.000") || strings.Contains(text, "scale=0.000") {
 			t.Errorf("request %d has incorrect actual parameters", i)
 		}
-		wantImages := 2
+		wantImages := 3 // 原图 + 两个独立成品角度。
 		images := 0
 		for _, c := range content {
 			if c.(map[string]any)["type"] == "image_url" {

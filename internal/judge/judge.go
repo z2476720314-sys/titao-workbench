@@ -36,6 +36,8 @@ type Placement struct {
 	FillTop                 bool
 	AlignBottom             bool
 	FullBleed               bool
+	TransparentPadding      bool
+	AnchorX, AnchorY        int
 	SourceDataURL           string
 	Fit                     string
 	NoCrop                  bool
@@ -51,7 +53,15 @@ func (p Placement) Description() string {
 	if p.FullBleed {
 		baseline = "按原比例铺满壳面，边缘背景可以略裁，主要内容必须保留"
 	}
-	text := fmt.Sprintf("实际参数：fit=%s，no_crop=%t，%s，offset_x=%.3f，offset_y=%.3f。scale=1 的基准是%s，零偏移为居中，正 x 向右、正 y 向下；位移按图案原始画布方向判断。优先保持基准大小，只在主要内容被明显裁切或遮挡时调整，不许裁掉主体。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY, baseline)
+	if p.TransparentPadding {
+		baseline = "按原画布比例初始满铺，可利用透明留白移动主体"
+	}
+	text := fmt.Sprintf("实际参数：fit=%s，no_crop=%t，%s，offset_x=%.3f，offset_y=%.3f。scale=1 的基准是%s，零偏移为居中，正 x 向右、正 y 向下；位移按图案原始画布方向判断。优先保持基准大小，主要内容被明显裁切或遮挡时调整，保护脸部与关键文字。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY, baseline)
+	if p.NoCrop {
+		text += "只允许透明或空白留边超出壳底，可见图案内容不能越过壳面边界；下移余量不足时适度等比缩小，不能为露出头部而裁掉底部实际内容。"
+	} else {
+		text += "用户允许裁剪：壳边和壳底可自然裁掉背景、装饰或身体边缘；优先保持主体大小并下移，让头部和文字避开镜头，不为保全整幅图案而缩小主体。"
+	}
 	if p.FillTop {
 		text += "这是一张确认过的满版重复背景，已按2:1画布贴合左右底部，并只续铺顶部缺口。请检查接缝、轮廓和保真，不要建议缩小背景重新制造留白。"
 	}
@@ -60,6 +70,12 @@ func (p Placement) Description() string {
 	}
 	if p.FullBleed {
 		text += "本图按原画布等比满铺，原有透明或半透明区域及主体位置都是原设计，不能因透明度改成缩小贴纸。只评估主要文字、人物或标志是否明显缺失。头发、帽尖、背景装饰被镜头自然遮住不算主体问题。确有主体问题才微调，调整后仍须满铺，禁止缩小留边。"
+	}
+	if p.TransparentPadding {
+		text += "本图有透明留白，移动边界按可见内容计算，透明画布边缘不锁定主体位置。脸部、头部轮廓或关键文字被镜头遮挡时，优先 down 利用底部透明余量；下移空间不足才 avoid_cam 等比缩小并下移。图案底部若有明显横向截断边，须 down 衔接壳底。独立完整贴纸无须强制贴底，以镜头下方可见背板居中为准。不要仅因原画布居中就放行遮挡。"
+	}
+	if p.AnchorX != 0 || p.AnchorY != 0 {
+		text += fmt.Sprintf("检测到明显直线截断边，已固定贴边锚点 anchor_x=%d、anchor_y=%d（负值为左/上，正值为右/下；x=2为左右同时贴边，此时不缩小宽度）。缩放后仍贴住该壳边，不要建议把截断边移到壳面内部悬空。", p.AnchorX, p.AnchorY)
 	}
 	return text
 }

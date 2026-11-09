@@ -53,6 +53,57 @@ func TestCoverFineTuningCannotExposeEmptyBorders(t *testing.T) {
 	}
 }
 
+func TestTransparentMarginsAllowMovingVisibleContent(t *testing.T) {
+	var req psx.RenderRequest
+	if err := json.Unmarshal([]byte(`{"Fit":"cover","NoCrop":true,"OffsetY":0.2,"ContentBounds":[0,0.1,1,0.75]}`), &req); err != nil {
+		t.Fatal(err)
+	}
+	x, y := placementCenter(req, 100, 200, 100, 200)
+	if x != 50 || y != 140 {
+		t.Fatalf("transparent bottom margin must allow down: (%v,%v)", x, y)
+	}
+	req.OffsetY = 0.5
+	_, y = placementCenter(req, 100, 200, 100, 200)
+	if y != 150 {
+		t.Fatalf("visible content must stop at bottom: %v", y)
+	}
+	sx, sy, err := placementScale(req, 0.8, 100, 200, 100, 200)
+	if err != nil || sx != 0.8 || sy != 0.8 {
+		t.Fatalf("camera avoidance must permit proportional shrinking: %v %v %v", sx, sy, err)
+	}
+	sx, sy, err = placementScale(req, 1.3, 100, 200, 100, 200)
+	if err != nil || sx != 1 || sy != 1 {
+		t.Fatalf("no_crop must protect visible edges even with cover: %v %v %v", sx, sy, err)
+	}
+	if err := json.Unmarshal([]byte(`{"Fit":"cover","NoCrop":true,"ContentBounds":[0.1,0.1,0.9,0.9]}`), &req); err != nil {
+		t.Fatal(err)
+	}
+	sx, sy, err = placementScale(req, 0.9, 100, 200, 200, 200)
+	if err != nil || sx != 0.5625 || sy != 0.5625 {
+		t.Fatalf("shrinking must apply to the effective no-crop baseline: %v %v %v", sx, sy, err)
+	}
+}
+
+func TestCutEdgeStaysOnShellAfterShrinking(t *testing.T) {
+	var req psx.RenderRequest
+	if err := json.Unmarshal([]byte(`{"Fit":"cover","NoCrop":true,"ContentBounds":[0,0.1,1,0.75],"AnchorX":-1,"AnchorY":1}`), &req); err != nil {
+		t.Fatal(err)
+	}
+	x, y := placementCenter(req, 100, 200, 80, 160)
+	if x != 40 || y != 160 {
+		t.Fatalf("cut left/bottom edges must remain attached after shrink: (%v,%v)", x, y)
+	}
+	req.AnchorX = 2
+	sx, sy, err := placementScale(req, .8, 100, 200, 100, 200)
+	if err != nil || sx != 1 || sy != 1 {
+		t.Fatalf("opposing cut sides must keep full width: %v,%v,%v", sx, sy, err)
+	}
+	req.ContentBounds = [4]float64{0, .1, 1, .9}
+	if _, _, err := placementScale(req, 1, 100, 200, 100, 300); err == nil {
+		t.Fatal("incompatible full-width and no-crop constraints must be explicit")
+	}
+}
+
 func TestObjectsDeduplicateByContentsNotFileName(t *testing.T) {
 	layers := []layer{{ID: 1, Name: "插画", Kind: "Group", Children: []layer{
 		{ID: 2, Kind: "Smart Object", SmartContents: &contents{ID: 7}},

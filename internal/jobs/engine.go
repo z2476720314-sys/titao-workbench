@@ -990,6 +990,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 
 	referencePath := patPath
 	renderFit := opt.Fit
+	transparentPadding := fullBleed && pr.ContentBounds != [4]float64{} && pr.ContentBounds != [4]float64{0, 0, 1, 1}
 	if fullBleed {
 		renderFit = psx.FitCover
 		e.logf("dim", "  按原画布等比满铺，保留透明度与原构图，仅检查主要内容问题")
@@ -1001,7 +1002,10 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	tc := tuner.Config(jc)
 	reviewOn := opt.Auto && def.AutoTuneOn
 	alignBottom := pr.BottomContent && fitIsContainLike(renderFit)
-	placement := judge.Placement{Fit: renderFit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, AlignBottom: alignBottom, FullBleed: fullBleed}
+	placement := judge.Placement{Fit: renderFit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, AlignBottom: alignBottom, FullBleed: fullBleed && !transparentPadding, TransparentPadding: transparentPadding}
+	if transparentPadding {
+		placement.AnchorX, placement.AnchorY = pr.AnchorX, pr.AnchorY
+	}
 	if alignBottom {
 		e.logf("dim", "  原图底部有内容：按原比例贴合壳底")
 	}
@@ -1085,6 +1089,10 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			PSVersion:    def.PSVersion,
 			NoCrop:       opt.NoCrop,
 			AlignBottom:  alignBottom,
+		}
+		if transparentPadding {
+			req.ContentBounds = pr.ContentBounds
+			req.AnchorX, req.AnchorY = pr.AnchorX, pr.AnchorY
 		}
 		log, err := e.ps.Render(req)
 		for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
@@ -1172,14 +1180,14 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			t.Message = fmt.Sprintf("第 %d 轮评审微调", round)
 		})
 
-		jpg, err := imgutil.FirstCellJPEG(flatPick, opt.CellSize, def.ImageMaxSide, 90)
+		views, err := imgutil.ReviewCellsJPEG(flatPick, opt.CellSize, def.ImageMaxSide, 90)
 		if err != nil {
 			e.logf("warn", "  评审图生成失败，结束微调: %v", err)
 			hist = append(hist, cur)
 			break
 		}
 		placement.Scale, placement.OffsetX, placement.OffsetY = chosenScale, offX, offY
-		adv := tuner.Critique(tc, jpg, placement)
+		adv := tuner.Critique(tc, views[0], placement, views[1:]...)
 		reviewGood = adv.Good && !adv.Fallback
 		cur.Score = adv.Score
 		cur.Problem = adv.Problem
@@ -1213,7 +1221,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 
 		// 禁止裁切时，微调不能把图案放大到超出壳面。
 		// 只压回上限、不放弃这一轮：模型可能同时给了位移建议，位移仍要生效。
-		if fullBleed && nextScale < 1 {
+		if fullBleed && !transparentPadding && nextScale < 1 {
 			nextScale = 1
 		}
 		if !fullBleed && opt.NoCrop && fitIsContainLike(opt.Fit) && nextScale > 1 {

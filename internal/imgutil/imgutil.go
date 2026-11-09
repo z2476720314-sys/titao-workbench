@@ -34,6 +34,10 @@ type PatternResult struct {
 	OrigWidth, OrigHeight int
 	// BottomContent is measured before trimming so floating logos stay centered.
 	BottomContent bool
+	// ContentBounds is the visible alpha rectangle as fractions of the saved canvas.
+	ContentBounds [4]float64
+	// Negative anchors attach left/top; positive attach right/bottom; X=2 spans both sides.
+	AnchorX, AnchorY int
 }
 
 // Rect 是矩形区域。
@@ -102,6 +106,10 @@ func Normalize(src, dst string, trim bool) (PatternResult, error) {
 	}
 
 	res.Width, res.Height = rgba.Bounds().Dx(), rgba.Bounds().Dy()
+	if box, ok := alphaBounds(rgba); ok {
+		res.ContentBounds = [4]float64{float64(box.Min.X) / float64(res.Width), float64(box.Min.Y) / float64(res.Height), float64(box.Max.X) / float64(res.Width), float64(box.Max.Y) / float64(res.Height)}
+	}
+	res.AnchorX, res.AnchorY = cutEdgeAnchors(rgba)
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return res, err
@@ -167,6 +175,61 @@ func alphaBounds(img *image.NRGBA) (image.Rectangle, bool) {
 		return raw, true
 	}
 	return candidate, true
+}
+
+// cutEdgeAnchors distinguishes a sustained straight cut from a natural contour.
+func cutEdgeAnchors(img *image.NRGBA) (int, int) {
+	b, ok := alphaBoundsAtLeast(img, 8)
+	if !ok {
+		return 0, 0
+	}
+	runFraction := func(start, delta image.Point, length int) float64 {
+		run, longest := 0, 0
+		for i, p := 0, start; i < length; i, p = i+1, p.Add(delta) {
+			if img.NRGBAAt(p.X, p.Y).A >= 8 {
+				run++
+			} else {
+				run = 0
+			}
+			longest = max(longest, run)
+		}
+		return float64(longest) / float64(length)
+	}
+	edgeScore := func(start, along, inward image.Point, length, depth int) float64 {
+		score := runFraction(start, along, length)
+		if score*float64(length) < 12 {
+			return 0
+		}
+		for i := 1; i < min(3, depth); i++ {
+			next := runFraction(start.Add(inward.Mul(i)), along, length)
+			if next < score*.9 || next > score*1.1 {
+				return 0
+			}
+		}
+		return score
+	}
+	left := edgeScore(b.Min, image.Pt(0, 1), image.Pt(1, 0), b.Dy(), b.Dx())
+	right := edgeScore(image.Pt(b.Max.X-1, b.Min.Y), image.Pt(0, 1), image.Pt(-1, 0), b.Dy(), b.Dx())
+	top := edgeScore(b.Min, image.Pt(1, 0), image.Pt(0, 1), b.Dx(), b.Dy())
+	bottom := edgeScore(image.Pt(b.Min.X, b.Max.Y-1), image.Pt(1, 0), image.Pt(0, -1), b.Dx(), b.Dy())
+	x, y := 0, 0
+	// The camera end remains free when both vertical cuts are equally strong.
+	if max(left, right) >= .2 {
+		x = -1
+		if right > left {
+			x = 1
+		}
+		if min(left, right) >= .2 {
+			x = 2
+		}
+	}
+	if max(top, bottom) >= .2 {
+		y = 1
+		if top > bottom {
+			y = -1
+		}
+	}
+	return x, y
 }
 
 func alphaBoundsAtLeast(img *image.NRGBA, minimum uint8) (image.Rectangle, bool) {
@@ -296,6 +359,39 @@ func FirstCellJPEG(src string, cellSize, maxSide int, quality int) ([]byte, erro
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+// ReviewCellsJPEG keeps each sampled angle at its own readable resolution.
+func ReviewCellsJPEG(src string, cellSize, maxSide, quality int) ([][]byte, error) {
+	if cellSize <= 0 || maxSide <= 0 {
+		return nil, fmt.Errorf("无效评审预览尺寸")
+	}
+	im, err := Decode(src)
+	if err != nil {
+		return nil, err
+	}
+	b := im.Bounds()
+	n := b.Dy() / cellSize
+	if b.Dx() < cellSize || n == 0 {
+		return nil, fmt.Errorf("拼合图 %dx%d 小于一格 %d", b.Dx(), b.Dy(), cellSize)
+	}
+	var views [][]byte
+	previous := -1
+	for _, i := range []int{0, n / 2, n - 1} {
+		if i == previous {
+			continue
+		}
+		previous = i
+		r := image.Rect(b.Min.X, b.Min.Y+i*cellSize, min(b.Max.X, b.Min.X+cellSize), min(b.Max.Y, b.Min.Y+(i+1)*cellSize))
+		cell := image.NewRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
+		draw.Draw(cell, cell.Bounds(), im, r.Min, draw.Src)
+		var out bytes.Buffer
+		if err := jpeg.Encode(&out, downscale(cell, maxSide), &jpeg.Options{Quality: quality}); err != nil {
+			return nil, err
+		}
+		views = append(views, out.Bytes())
+	}
+	return views, nil
 }
 
 // nonWhiteBounds 找出与纯白差异超过阈值的像素包围盒。
