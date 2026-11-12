@@ -46,6 +46,7 @@ titao-update.bat
 config.json
 build/bin/config.json
 queue.json
+completed.json
 precheck.jsonl
 precheck.sample*.jsonl
 

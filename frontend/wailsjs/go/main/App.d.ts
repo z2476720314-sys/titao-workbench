@@ -79,6 +79,8 @@ export function RunStatus():Promise<Record<string, any>>;
 
 export function SaveConfig(arg1:cfg.Config):Promise<cfg.Config>;
 
+export function SaveWorkspace(arg1:Array<string>,arg2:Array<string>,arg3:string):Promise<number>;
+
 export function StartGen(arg1:genjobs.Options):Promise<void>;
 
 export function StartRun(arg1:jobs.Options):Promise<void>;

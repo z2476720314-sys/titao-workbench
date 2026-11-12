@@ -45,41 +45,43 @@ const (
 
 // Options 是一次套图运行的参数。
 type Options struct {
-	Patterns    []string  `json:"patterns"`  // 图案文件或目录
-	Templates   []string  `json:"templates"` // 模板文件或目录
-	OutputDir   string    `json:"outputDir"`
-	Group       string    `json:"group"`
-	Fit         string    `json:"fit"`
-	Scales      []float64 `json:"scales"` // 为空则用配置里的 candidates
-	Auto        bool      `json:"auto"`   // 是否调视觉模型
-	TrimAlpha   bool      `json:"trimAlpha"`
-	OffsetX     float64   `json:"offsetX"`
-	OffsetY     float64   `json:"offsetY"`
-	CellSize    int       `json:"cellSize"`
-	JPGQuality  int       `json:"jpgQuality"`
-	PatternName string    `json:"patternName"` // 仅单图案时覆盖名称
-	MaxRounds   int       `json:"maxRounds"`   // 评审微调最多几轮，0 则用配置里的 max_rounds
-	NoCrop      bool      `json:"noCrop"`      // 禁止裁切：放大上限压到「完整放下」
+	Patterns     []string  `json:"patterns"`     // 图案文件或目录
+	PatternLimit int       `json:"patternLimit"` // 0 为全部，按未完成图案计数
+	Templates    []string  `json:"templates"`    // 模板文件或目录
+	OutputDir    string    `json:"outputDir"`
+	Group        string    `json:"group"`
+	Fit          string    `json:"fit"`
+	Scales       []float64 `json:"scales"` // 为空则用配置里的 candidates
+	Auto         bool      `json:"auto"`   // 是否调视觉模型
+	TrimAlpha    bool      `json:"trimAlpha"`
+	OffsetX      float64   `json:"offsetX"`
+	OffsetY      float64   `json:"offsetY"`
+	CellSize     int       `json:"cellSize"`
+	JPGQuality   int       `json:"jpgQuality"`
+	PatternName  string    `json:"patternName"` // 仅单图案时覆盖名称
+	MaxRounds    int       `json:"maxRounds"`   // 评审微调最多几轮，0 则用配置里的 max_rounds
+	NoCrop       bool      `json:"noCrop"`      // 禁止裁切：放大上限压到「完整放下」
 }
 
 // Task 是一个「图案 × 模板」组合。
 type Task struct {
-	FillTop      bool     `json:"fillTop,omitempty"`
-	ID           int      `json:"id"`
-	Pattern      string   `json:"pattern"`
-	PatternName  string   `json:"patternName"`
-	Template     string   `json:"template"`
-	TemplateName string   `json:"templateName"`
-	Phase        Phase    `json:"phase"`
-	Progress     int      `json:"progress"` // 0-100
-	Message      string   `json:"message"`
-	OutputDir    string   `json:"outputDir"`
-	Files        []string `json:"files"`
-	Error        string   `json:"error"`
-	ChosenScale  float64  `json:"chosenScale"`
-	JudgeNote    string   `json:"judgeNote"`
-	TuneRounds   int      `json:"tuneRounds"` // 实际迭代轮数
-	ElapsedMS    int64    `json:"elapsedMs"`
+	CompletionKey string   `json:"-"`
+	FillTop       bool     `json:"fillTop,omitempty"`
+	ID            int      `json:"id"`
+	Pattern       string   `json:"pattern"`
+	PatternName   string   `json:"patternName"`
+	Template      string   `json:"template"`
+	TemplateName  string   `json:"templateName"`
+	Phase         Phase    `json:"phase"`
+	Progress      int      `json:"progress"` // 0-100
+	Message       string   `json:"message"`
+	OutputDir     string   `json:"outputDir"`
+	Files         []string `json:"files"`
+	Error         string   `json:"error"`
+	ChosenScale   float64  `json:"chosenScale"`
+	JudgeNote     string   `json:"judgeNote"`
+	TuneRounds    int      `json:"tuneRounds"` // 实际迭代轮数
+	ElapsedMS     int64    `json:"elapsedMs"`
 }
 
 // Event 是推给前端的事件。
@@ -120,14 +122,15 @@ type Engine struct {
 	store  *cfg.Store
 	emitFn func(Event)
 
-	mu      sync.Mutex
-	tasks   []*Task
-	running bool
-	state   State
-	cancel  context.CancelFunc
-	started time.Time
-	done    int
-	failed  int
+	mu           sync.Mutex
+	completionMu sync.Mutex
+	tasks        []*Task
+	running      bool
+	state        State
+	cancel       context.CancelFunc
+	started      time.Time
+	done         int
+	failed       int
 
 	// 闸门：让 run 循环在组边界停住。
 	// 单独一把锁 + cond，不能用 mu：暂停等待期间 mu 必须能自由加解锁，
@@ -324,6 +327,9 @@ func (e *Engine) resetGate() {
 
 // Plan 把选项展开成任务列表，并做可执行性校验。
 func Plan(opt Options, def cfg.Config) ([]*Task, error) {
+	if opt.PatternLimit < 0 {
+		return nil, fmt.Errorf("本次图案数量不能为负数")
+	}
 	patterns, err := expandPaths(opt.Patterns, map[string]bool{
 		".png": true, ".jpg": true, ".jpeg": true, ".tif": true, ".tiff": true, ".webp": true,
 	})
@@ -340,12 +346,16 @@ func Plan(opt Options, def cfg.Config) ([]*Task, error) {
 	if len(templates) == 0 {
 		return nil, fmt.Errorf("没有找到可用的模板（.tif / .tiff）")
 	}
+	singlePattern := len(patterns) == 1
+	if opt.PatternLimit > 0 && len(patterns) > opt.PatternLimit {
+		patterns = patterns[:opt.PatternLimit]
+	}
 
 	var tasks []*Task
 	id := 0
 	for _, pat := range patterns {
 		pname := strings.TrimSuffix(filepath.Base(pat), filepath.Ext(pat))
-		if opt.PatternName != "" && len(patterns) == 1 {
+		if opt.PatternName != "" && singlePattern {
 			pname = opt.PatternName
 		}
 		for _, tpl := range templates {
@@ -424,9 +434,12 @@ func (e *Engine) Start(opt Options) error {
 		return fmt.Errorf("配置未加载，无法开始")
 	}
 	def := e.store.Get()
-	tasks, err := Plan(opt, def)
+	tasks, err := e.Plan(opt)
 	if err != nil {
 		return err
+	}
+	if len(tasks) == 0 {
+		return fmt.Errorf("所选图案与模板均已完成，成品存在，无需重复套图")
 	}
 	return e.begin(opt, def, tasks, 0, 0)
 }
@@ -533,6 +546,11 @@ func (e *Engine) begin(opt Options, def cfg.Config, tasks []*Task, done, failed 
 	if strings.TrimSpace(opt.OutputDir) == "" {
 		return fmt.Errorf("请先选择输出目录")
 	}
+	if e.store != nil {
+		if _, err := loadCompletions(e.completionPath()); err != nil {
+			return err
+		}
+	}
 	if !e.tryLockIdle() {
 		return fmt.Errorf("已有任务在运行")
 	}
@@ -595,6 +613,13 @@ func (e *Engine) ClearQueue() error {
 	if e.IsRunning() {
 		return fmt.Errorf("运行中无法清理队列")
 	}
+	if e.store != nil {
+		e.completionMu.Lock()
+		defer e.completionMu.Unlock()
+		if _, err := e.loadCompletionHistory(e.store.Get()); err != nil {
+			return err
+		}
+	}
 	return RemoveQueue(e.queuePath())
 }
 
@@ -612,6 +637,7 @@ func (e *Engine) saveQueue(opt Options) {
 
 func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, tasks []*Task) {
 	stopped := false
+	var completionErr error
 
 	defer func() {
 		e.mu.Lock()
@@ -639,6 +665,9 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 					done, failed, pending, skipped, tagSummary(skipTags))
 			}
 		}
+		if completionErr != nil {
+			msg += "；完成记录保存失败，请保留队列并检查错误"
+		}
 		// 收尾再落一次：把 done/finished 刷新到磁盘
 		e.saveQueue(opt)
 		// Publish idle only after the final queue write, so Resume cannot race it.
@@ -652,29 +681,7 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 	}()
 
 	// 参数兜底
-	if opt.Group == "" {
-		opt.Group = settings.Group
-	}
-	if opt.Fit == "" {
-		opt.Fit = settings.Fit
-	}
-	if opt.CellSize <= 0 {
-		opt.CellSize = settings.CellSize
-	}
-	if opt.JPGQuality <= 0 {
-		opt.JPGQuality = settings.JPGQuality
-	}
-	if len(opt.Scales) == 0 {
-		opt.Scales = settings.Candidates
-	}
-	if len(opt.Scales) == 0 {
-		// 配置被手工改坏（candidates 为空）时的最后兜底，避免下面 [:1] 越界 panic
-		opt.Scales = cfg.DefaultCandidates()
-	}
-	if !opt.Auto && len(opt.Scales) > 1 {
-		// 关掉自动判断时只需要一档；保留用户填的第一档而不是配置里的默认值
-		opt.Scales = opt.Scales[:1]
-	}
+	opt = effectiveJobOptions(opt, settings)
 	outRoot := opt.OutputDir
 	if outRoot == "" {
 		outRoot = settings.OutputDir
@@ -724,6 +731,11 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 		}
 
 		// 组开始前落盘：这时若被强杀，这一组会重跑（比漏跑安全）
+		// 暂停或重启期间可改待执行图案；只比较实际开工到导出之间的变化。
+		key, _ := completionKey(opt, settings, t)
+		e.mu.Lock()
+		t.CompletionKey = key
+		e.mu.Unlock()
 		e.markRunning(t)
 		e.saveQueue(opt)
 
@@ -733,6 +745,18 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 			continue
 		}
 		e.processFn(e, ctx, opt, settings, tuneConfig, t, outRoot, i+1, len(tasks))
+		if err := e.recordCompletion(opt, settings, t); err != nil {
+			completionErr = err
+			e.updateTask(t, func(t *Task) {
+				t.Message += "（完成记录保存失败，请勿重新排队）"
+				t.Error = err.Error()
+			})
+			e.logf("error", "完成记录保存失败，停止后续任务：%v", err)
+			stopped = true
+			e.cancelRest(tasks[i+1:])
+			e.saveQueue(opt)
+			break
+		}
 		// 组结束后落盘：强杀恢复时能准确知道这组已完成
 		e.saveQueue(opt)
 	}
@@ -1000,7 +1024,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	//    直到模型说「够了」、调不动、或到达 max_rounds 上限。
 	//    关闭自动判断或 auto_tune_on 时退化为原来的单轮行为。
 	tc := tuner.Config(jc)
-	reviewOn := opt.Auto && def.AutoTuneOn
+	reviewOn, rounds := effectiveReviewSettings(opt, def)
 	alignBottom := pr.BottomContent && fitIsContainLike(renderFit)
 	placement := judge.Placement{Fit: renderFit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, AlignBottom: alignBottom, FullBleed: fullBleed && !transparentPadding, TransparentPadding: transparentPadding}
 	if transparentPadding {
@@ -1018,17 +1042,6 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	}
 	// 轮数优先级：请求里显式给的 maxRounds > 配置里的 max_rounds。
 	// 只有「调模型」才谈得上微调，所以 Auto 关闭时恒为 1 轮。
-	wantRounds := opt.MaxRounds
-	if wantRounds <= 0 {
-		wantRounds = def.MaxRounds
-	}
-	rounds := 1
-	if reviewOn && wantRounds > 1 {
-		rounds = wantRounds
-		if rounds > 3 {
-			rounds = 3
-		}
-	}
 
 	scales := opt.Scales
 	if reviewOn && fitIsContainLike(opt.Fit) {
@@ -1094,7 +1107,9 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			req.ContentBounds = pr.ContentBounds
 			req.AnchorX, req.AnchorY = pr.AnchorX, pr.AnchorY
 		}
+		renderStart := time.Now()
 		log, err := e.ps.Render(req)
+		e.logf("dim", "  第 %d 轮渲染耗时 %.1fs", round, time.Since(renderStart).Seconds())
 		for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
 			if line = strings.TrimSpace(line); line != "" {
 				e.logf("dim", "  %s", line)
@@ -1187,7 +1202,16 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			break
 		}
 		placement.Scale, placement.OffsetX, placement.OffsetY = chosenScale, offX, offY
+		reviewStart := time.Now()
 		adv := tuner.Critique(tc, views[0], placement, views[1:]...)
+		e.logf("dim", "  第 %d 轮模型评审耗时 %.1fs", round, time.Since(reviewStart).Seconds())
+		if adv.Usage != nil && adv.Usage.CompletionTokens != nil {
+			if adv.Usage.CompletionDetails != nil && adv.Usage.CompletionDetails.ReasoningTokens != nil {
+				e.logf("dim", "  末次模型响应输出 tokens %d（思考 tokens %d）", *adv.Usage.CompletionTokens, *adv.Usage.CompletionDetails.ReasoningTokens)
+			} else {
+				e.logf("dim", "  末次模型响应输出 tokens %d", *adv.Usage.CompletionTokens)
+			}
+		}
 		reviewGood = adv.Good && !adv.Fallback
 		cur.Score = adv.Score
 		cur.Problem = adv.Problem

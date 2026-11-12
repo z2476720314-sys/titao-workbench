@@ -43,6 +43,7 @@ type Config struct {
 
 // Advice 是模型对一张成品的评审结论。
 type Advice struct {
+	Usage *judge.TokenUsage `json:"-"`
 	// Good 表示这张已经够好，不需要再迭代。
 	Good bool `json:"good"`
 	// Score 是 0~100 的综合分（饱满度、居中、不压摄像头、不裁切）。
@@ -121,7 +122,7 @@ func Critique(cfg Config, jpeg []byte, placement judge.Placement, otherViews ...
 		map[string]any{"role": "system", "content": "只输出最终评审 JSON 对象，不输出分析、推理或 Markdown。字段必须包含 good(boolean)、score(0至100的整数)、problem(string)、direction(从 none/bigger/smaller/up/down/left/right/avoid_cam 中选一个)、step(number)。必须根据图片评审，不能因输出格式问题推断图片合格。"},
 		map[string]any{"role": "user", "content": content},
 	}
-	body := map[string]any{"model": cfg.Model, "messages": messages, "max_tokens": cfg.MaxTokens, "temperature": cfg.Temperature}
+	body := map[string]any{"stream": true, "stream_options": map[string]bool{"include_usage": true}, "model": cfg.Model, "messages": messages, "max_tokens": cfg.MaxTokens, "temperature": cfg.Temperature}
 	judge.ApplyThinking(body, cfg.Model, cfg.Thinking)
 	judge.ApplyJSONResponse(body, cfg.Model)
 
@@ -157,6 +158,7 @@ func Critique(cfg Config, jpeg []byte, placement judge.Placement, otherViews ...
 			return fallback(fmt.Errorf("HTTP %d: %.300s", resp.StatusCode, raw))
 		}
 		var parsed struct {
+			Usage   *judge.TokenUsage `json:"usage"`
 			Choices []struct {
 				FinishReason string `json:"finish_reason"`
 				Message      struct {
@@ -187,6 +189,7 @@ func Critique(cfg Config, jpeg []byte, placement judge.Placement, otherViews ...
 			}
 		}
 		if adv.Direction != "" {
+			adv.Usage = parsed.Usage
 			adv.Raw = strings.TrimSpace(reply.Message.Content)
 			return adv
 		}

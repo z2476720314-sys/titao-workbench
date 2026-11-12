@@ -160,23 +160,75 @@ func (a *App) GetConfig() (map[string]any, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("配置未加载")
 	}
+	c := a.store.Get()
+	workspaceError := ""
+	legacyWorkspace := c.PatternPaths == nil && c.TemplatePaths == nil
+	if c.PatternPaths == nil || c.TemplatePaths == nil {
+		q, err := jobs.LoadQueue(filepath.Join(filepath.Dir(a.store.Path()), "queue.json"))
+		if err != nil {
+			workspaceError = fmt.Sprintf("恢复上次路径失败：%v", err)
+		} else if q != nil {
+			if c.PatternPaths == nil {
+				c.PatternPaths = append([]string{}, q.Options.Patterns...)
+			}
+			if c.TemplatePaths == nil {
+				c.TemplatePaths = append([]string{}, q.Options.Templates...)
+			}
+			if legacyWorkspace {
+				c.OutputDir = q.Options.OutputDir
+			}
+		}
+	}
 	return map[string]any{
-		"config": a.store.Get(),
-		"path":   a.store.Path(),
+		"config":         c,
+		"path":           a.store.Path(),
+		"workspaceError": workspaceError,
 	}, nil
 }
 
 // SaveConfig 保存配置（整份覆盖）。
 func (a *App) SaveConfig(c cfg.Config) (cfg.Config, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.store == nil {
 		return cfg.Config{}, fmt.Errorf("配置未加载")
 	}
 	if c.Renderer != "" && c.Renderer != "photoshop" && c.Renderer != "photocraft" {
 		return cfg.Config{}, fmt.Errorf("未知套图引擎 %q", c.Renderer)
 	}
+	if c.WorkspaceRevision != a.store.Get().WorkspaceRevision {
+		return cfg.Config{}, fmt.Errorf("路径已更新，请重新加载配置后再保存；当前草稿未保存")
+	}
 	return a.store.Update(func(cur *cfg.Config) {
+		// 路径列表由 SaveWorkspace 保存，设置页的旧快照不能覆盖它们。
+		if cur.PatternPaths != nil {
+			c.PatternPaths = cur.PatternPaths
+		}
+		if cur.TemplatePaths != nil {
+			c.TemplatePaths = cur.TemplatePaths
+		}
+		c.WorkspaceRevision = cur.WorkspaceRevision
+		if c.OutputDir != cur.OutputDir {
+			c.WorkspaceRevision++
+		}
 		*cur = c
 	})
+}
+
+// SaveWorkspace 只保存路径选择，不覆盖模型配置或密钥。
+func (a *App) SaveWorkspace(patterns, templates []string, outputDir string) (int64, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.store == nil {
+		return 0, fmt.Errorf("配置未加载")
+	}
+	c, err := a.store.Update(func(cur *cfg.Config) {
+		cur.PatternPaths = append([]string{}, patterns...)
+		cur.TemplatePaths = append([]string{}, templates...)
+		cur.OutputDir = outputDir
+		cur.WorkspaceRevision++
+	})
+	return c.WorkspaceRevision, err
 }
 
 // OpenConfigFile 用系统默认程序打开 config.json。
@@ -290,10 +342,10 @@ func (a *App) ProbeTemplate(templatePath string) (*psx.TemplateInfo, error) {
 
 // PlanTasks 预览任务展开结果，不执行。
 func (a *App) PlanTasks(opt jobs.Options) ([]*jobs.Task, error) {
-	if a.store == nil {
+	if a.store == nil || a.eng == nil {
 		return nil, fmt.Errorf("配置未加载")
 	}
-	return jobs.Plan(opt, a.store.Get())
+	return a.eng.Plan(opt)
 }
 
 // StartRun 开始一次套图运行。
@@ -358,7 +410,17 @@ func (a *App) PendingQueue() (*jobs.Queue, error) {
 	if a.eng == nil {
 		return nil, fmt.Errorf("引擎未初始化")
 	}
-	return a.eng.PendingQueue()
+	if a.store == nil {
+		return nil, nil
+	}
+	q, err := jobs.LoadQueue(filepath.Join(filepath.Dir(a.store.Path()), "queue.json"))
+	if err != nil {
+		return nil, err
+	}
+	if q == nil || !q.HasPending() {
+		return nil, nil
+	}
+	return q, nil
 }
 
 // ClearQueue 丢弃上次没跑完的队列。
@@ -374,11 +436,23 @@ func (a *App) RunStatus() map[string]any {
 	if a.eng == nil {
 		return map[string]any{"running": false, "state": "idle", "tasks": []*jobs.Task{}}
 	}
-	return map[string]any{
-		"running": a.eng.IsRunning(),
-		"state":   string(a.eng.State()),
-		"tasks":   a.eng.Tasks(),
+	running, state, tasks := a.eng.IsRunning(), a.eng.State(), a.eng.Tasks()
+	status := map[string]any{"running": running, "state": string(state), "tasks": tasks}
+	if !running && state == jobs.StateIdle && len(tasks) == 0 && a.store != nil {
+		q, err := jobs.LoadQueue(filepath.Join(filepath.Dir(a.store.Path()), "queue.json"))
+		if err != nil {
+			status["error"] = fmt.Sprintf("读取上次任务记录失败：%v", err)
+		} else if q != nil {
+			restored := jobs.RestoreQueueTasks(q, q.Options.OutputDir)
+			for _, task := range restored {
+				if len(task.Files) > 0 {
+					task.OutputDir = filepath.Dir(task.Files[0])
+				}
+			}
+			status["tasks"] = restored
+		}
 	}
+	return status
 }
 
 // ---------------------------------------------------------------------------

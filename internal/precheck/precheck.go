@@ -102,10 +102,12 @@ func modelText(cfg Config, prompt string, views []string) (string, error) {
 	}
 
 	body := map[string]any{
-		"model":       cfg.Model,
-		"messages":    []any{map[string]any{"role": "user", "content": content}},
-		"max_tokens":  cfg.MaxTokens,
-		"temperature": cfg.Temperature,
+		"stream":         true,
+		"stream_options": map[string]bool{"include_usage": true},
+		"model":          cfg.Model,
+		"messages":       []any{map[string]any{"role": "user", "content": content}},
+		"max_tokens":     cfg.MaxTokens,
+		"temperature":    cfg.Temperature,
 	}
 	judge.ApplyThinking(body, cfg.Model, cfg.Thinking)
 	judge.ApplyJSONResponse(body, cfg.Model)

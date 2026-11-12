@@ -46,6 +46,9 @@ const CONFIG = {
   output_dir: FRESH ? '' : OUT,
   template_dir: FRESH ? '' : 'demo/templates',
   pattern_dir: FRESH ? '' : 'demo/patterns',
+  pattern_paths: [] as string[],
+  template_paths: [] as string[],
+  workspace_revision: 0,
   group: '插画',
   fit: 'auto',
   cell_size: 800,
@@ -69,6 +72,17 @@ const CONFIG = {
   ps_version: '27.7.0',
   update_check: true,
 }
+
+const workspaceKey = FRESH ? '__mock_workspace_fresh' : '__mock_workspace'
+try {
+  const saved = JSON.parse(sessionStorage.getItem(workspaceKey) || 'null')
+  if (saved && Array.isArray(saved.pattern_paths) && saved.pattern_paths.every((p: unknown) => typeof p === 'string') &&
+    Array.isArray(saved.template_paths) && saved.template_paths.every((p: unknown) => typeof p === 'string') && typeof saved.output_dir === 'string') {
+    CONFIG.pattern_paths = saved.pattern_paths
+    CONFIG.template_paths = saved.template_paths
+    CONFIG.output_dir = saved.output_dir
+  }
+} catch {}
 
 const mkTask = (o: any) => ({
   id: 1, pattern: PATTERN, patternName: 'pattern-a',
@@ -203,7 +217,19 @@ function playRun() {
 
 const handlers: Record<string, (...a: any[]) => any> = {
   GetConfig: () => ({ config: structuredClone(CONFIG), path: 'demo/config.json' }),
-  SaveConfig: (c: any) => { Object.assign(CONFIG, c); return structuredClone(CONFIG) },
+  SaveConfig: (c: any) => {
+    if (c.workspace_revision !== CONFIG.workspace_revision) throw new Error('路径已更新，请重新加载配置后再保存；当前草稿未保存')
+    const revision = CONFIG.workspace_revision + (c.output_dir !== CONFIG.output_dir ? 1 : 0)
+    Object.assign(CONFIG, c, { workspace_revision: revision })
+    return structuredClone(CONFIG)
+  },
+  SaveWorkspace: (patterns: string[], templates: string[], output: string) => {
+    sessionStorage.setItem(workspaceKey, JSON.stringify({ pattern_paths: patterns, template_paths: templates, output_dir: output }))
+    CONFIG.pattern_paths = [...patterns]
+    CONFIG.template_paths = [...templates]
+    CONFIG.output_dir = output
+    return ++CONFIG.workspace_revision
+  },
   OpenConfigFile: () => null,
   CheckPhotoshop: () => ({ available: true, pending: FRESH, engine: CONFIG.renderer === 'photocraft' ? 'PhotoCraft' : 'Photoshop', version: FRESH ? '' : CONFIG.renderer === 'photocraft' ? '0.16.0' : '27.7.0', error: '', checked: true }),
   AppVersion: () => '0.3.4',

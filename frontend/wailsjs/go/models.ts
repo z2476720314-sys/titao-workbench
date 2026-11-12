@@ -17,6 +17,9 @@ export namespace cfg {
 	    template_dir: string;
 	    pattern_dir: string;
 	    output_dir: string;
+	    pattern_paths: string[];
+	    template_paths: string[];
+	    workspace_revision: number;
 	    group: string;
 	    fit: string;
 	    cell_size: number;
@@ -62,6 +65,9 @@ export namespace cfg {
 	        this.template_dir = source["template_dir"];
 	        this.pattern_dir = source["pattern_dir"];
 	        this.output_dir = source["output_dir"];
+	        this.pattern_paths = source["pattern_paths"];
+	        this.template_paths = source["template_paths"];
+	        this.workspace_revision = source["workspace_revision"];
 	        this.group = source["group"];
 	        this.fit = source["fit"];
 	        this.cell_size = source["cell_size"];
@@ -207,6 +213,7 @@ export namespace jobs {
 	
 	export class Options {
 	    patterns: string[];
+	    patternLimit: number;
 	    templates: string[];
 	    outputDir: string;
 	    group: string;
@@ -229,6 +236,7 @@ export namespace jobs {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.patterns = source["patterns"];
+	        this.patternLimit = source["patternLimit"];
 	        this.templates = source["templates"];
 	        this.outputDir = source["outputDir"];
 	        this.group = source["group"];
@@ -246,6 +254,7 @@ export namespace jobs {
 	    }
 	}
 	export class QueueTask {
+	    completion_key?: string;
 	    id: number;
 	    pattern: string;
 	    template: string;
@@ -266,6 +275,7 @@ export namespace jobs {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.completion_key = source["completion_key"];
 	        this.id = source["id"];
 	        this.pattern = source["pattern"];
 	        this.template = source["template"];

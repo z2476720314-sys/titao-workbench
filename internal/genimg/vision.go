@@ -248,10 +248,12 @@ func chat(ctx context.Context, vc VisionConfig, text string, images [][]byte) (s
 	}
 
 	body := map[string]any{
-		"model":       vc.Model,
-		"messages":    []any{map[string]any{"role": "user", "content": content}},
-		"max_tokens":  vc.MaxTokens,
-		"temperature": vc.Temperature,
+		"stream":         true,
+		"stream_options": map[string]bool{"include_usage": true},
+		"model":          vc.Model,
+		"messages":       []any{map[string]any{"role": "user", "content": content}},
+		"max_tokens":     vc.MaxTokens,
+		"temperature":    vc.Temperature,
 	}
 	judge.ApplyThinking(body, vc.Model, vc.Thinking)
 

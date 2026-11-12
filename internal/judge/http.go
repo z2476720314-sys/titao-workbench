@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -26,6 +27,17 @@ func DoVisionRequest(req *http.Request, timeout time.Duration) (*http.Response, 
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+				data, streamErr := readChatStream(resp.Body)
+				resp.Body.Close()
+				if streamErr != nil {
+					return nil, streamErr
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(data))
+				resp.Header.Set("Content-Type", "application/json")
+				resp.ContentLength = int64(len(data))
+				return resp, nil
+			}
 			// Four MiB matches the largest existing vision consumer limit.
 			data, readErr := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
 			resp.Body.Close()

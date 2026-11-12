@@ -35,6 +35,8 @@
   let patternPaths: string[] = []
   let templatePaths: string[] = []
   let outputDir = ''
+  let configLoaded = false
+  let workspaceSave: Promise<void> = Promise.resolve()
   let group = '插画'
   let fit = 'auto'
   let auto = true
@@ -45,6 +47,7 @@
   let jpgQuality = 95
   let cellSize = 800
   let patternName = ''
+  let patternLimit = 0
   let maxRounds = 3
   let noCrop = true
   let advOpen = false
@@ -311,6 +314,8 @@
       conf = r.config
       confPath = r.path
       syncConfigToForms()
+      configLoaded = true
+      if (r.workspaceError) notify('err', r.workspaceError)
     } catch (e: any) {
       notify('err', '加载配置失败：' + e)
     }
@@ -364,6 +369,7 @@
       runState = r.state || (r.running ? 'running' : 'idle')
       doneCount = tasks.filter((t) => t.phase === 'done').length
       failedCount = tasks.filter((t) => t.phase === 'failed').length
+      if (r.error) notify('err', r.error)
     } catch {}
   }
 
@@ -432,11 +438,31 @@
   }
 
   // ---------------- 路径操作 ----------------
+  async function saveWorkspace() {
+    try {
+      if (!configLoaded) throw new Error('配置尚未加载，路径草稿未保存')
+      const patterns = [...patternPaths]
+      const templates = [...templatePaths]
+      const output = outputDir
+      conf = { ...conf, pattern_paths: patterns, template_paths: templates, output_dir: output }
+      workspaceSave = workspaceSave.catch(() => {}).then(async () => {
+        const revision = await api.SaveWorkspace(patterns, templates, output)
+        conf = { ...conf, workspace_revision: revision }
+      })
+      await workspaceSave
+      return true
+    } catch (e: any) {
+      notify('err', '保存路径失败：' + e)
+      return false
+    }
+  }
+
   async function addPatterns() {
     try {
       const fs = await api.PickPatterns()
       if (fs?.length) {
         patternPaths = uniq([...patternPaths, ...fs])
+        await saveWorkspace()
       }
     } catch (e: any) {
       notify('err', String(e))
@@ -446,7 +472,10 @@
   async function addPatternDir() {
     try {
       const d = await api.PickPatternDir()
-      if (d) patternPaths = uniq([...patternPaths, d])
+      if (d) {
+        patternPaths = uniq([...patternPaths, d])
+        await saveWorkspace()
+      }
     } catch (e: any) {
       notify('err', String(e))
     }
@@ -455,7 +484,10 @@
   async function addTemplates() {
     try {
       const fs = await api.PickTemplates()
-      if (fs?.length) templatePaths = uniq([...templatePaths, ...fs])
+      if (fs?.length) {
+        templatePaths = uniq([...templatePaths, ...fs])
+        await saveWorkspace()
+      }
     } catch (e: any) {
       notify('err', String(e))
     }
@@ -464,7 +496,10 @@
   async function addTemplateDir() {
     try {
       const d = await api.PickTemplateDir()
-      if (d) templatePaths = uniq([...templatePaths, d])
+      if (d) {
+        templatePaths = uniq([...templatePaths, d])
+        await saveWorkspace()
+      }
     } catch (e: any) {
       notify('err', String(e))
     }
@@ -473,7 +508,10 @@
   async function pickOut() {
     try {
       const d = await api.PickOutputDir()
-      if (d) outputDir = d
+      if (d) {
+        outputDir = d
+        await saveWorkspace()
+      }
     } catch (e: any) {
       notify('err', String(e))
     }
@@ -523,6 +561,8 @@
     if (!patternPaths.length) return notify('warn', '请先添加图案')
     if (!templatePaths.length) return notify('warn', '请先添加模板')
     if (!psStatus.available) return notify('err', engineName + ' 未就绪：' + (psStatus.error || '未知'))
+    if (!Number.isInteger(Number(patternLimit)) || Number(patternLimit) < 0) return notify('warn', '图案数量需为非负整数')
+    if (!(await saveWorkspace())) return
 
     const scales = manualScale
       .split(/[,，\s]+/)
@@ -531,6 +571,7 @@
 
     const opt = {
       patterns: patternPaths,
+      patternLimit: Number(patternLimit),
       templates: templatePaths,
       outputDir,
       group,
@@ -558,7 +599,9 @@
       pendingQueue = null
       view = 'tasks'
     } catch (e: any) {
-      notify('err', String(e))
+      const message = String(e)
+      notify(message.includes('均已完成') ? 'info' : 'err', message)
+      await refreshStatus()
     }
   }
 
@@ -671,6 +714,8 @@
 
   // ---------------- 配置 ----------------
   function syncConfigToForms() {
+    patternPaths = Array.isArray(conf.pattern_paths) ? [...conf.pattern_paths] : conf.pattern_dir ? [conf.pattern_dir] : []
+    templatePaths = Array.isArray(conf.template_paths) ? [...conf.template_paths] : conf.template_dir ? [conf.template_dir] : []
     outputDir = conf.output_dir || ''
     group = conf.group || '插画'
     fit = conf.fit || 'auto'
@@ -690,8 +735,13 @@
     if (!conf) return
     savingConf = true
     try {
-      conf = await api.SaveConfig(conf)
-      syncConfigToForms()
+      await workspaceSave
+      const saved = await api.SaveConfig(conf)
+      await workspaceSave
+      if (saved.workspace_revision >= conf.workspace_revision) {
+        conf = saved
+        syncConfigToForms()
+      }
       confSaved = '已保存'
       setTimeout(() => (confSaved = ''), 2200)
     } catch (e: any) {
@@ -836,10 +886,14 @@
             <div class="card-hint">抠好的透明 PNG / JPG / TIF，可多选文件或直接选目录</div>
           </div>
           <div class="row">
-            <button on:click={addPatterns}>选文件</button>
-            <button on:click={addPatternDir}>选目录</button>
+            <label class="row" for="pattern-limit" style="gap:6px">
+              <span class="lbl" style="margin:0">本次数量</span>
+              <input id="pattern-limit" aria-label="本次待处理图案数量，0表示全部" title="仅计算未完成图案；0表示全部" type="number" min="0" step="1" bind:value={patternLimit} disabled={!configLoaded || running} style="width:84px" />
+            </label>
+            <button on:click={addPatterns} disabled={!configLoaded}>选文件</button>
+            <button on:click={addPatternDir} disabled={!configLoaded}>选目录</button>
             {#if patternPaths.length}
-              <button class="ghost" on:click={() => (patternPaths = [])}>清空</button>
+              <button class="ghost" on:click={() => { patternPaths = []; saveWorkspace() }}>清空</button>
             {/if}
           </div>
         </div>
@@ -847,7 +901,7 @@
           {#each patternPaths as p, i}
             <div class="path-item">
               <span class="name">{p}</span>
-              <button class="ghost del" on:click={() => (patternPaths = removeAt(patternPaths, i))}>移除</button>
+              <button class="ghost del" on:click={() => { patternPaths = removeAt(patternPaths, i); saveWorkspace() }}>移除</button>
             </div>
           {/each}
         </div>
@@ -861,13 +915,13 @@
             <div class="card-hint">PS 分层 TIF，内部「插画」组里是智能对象</div>
           </div>
           <div class="row">
-            <button on:click={addTemplates}>选文件</button>
-            <button on:click={addTemplateDir}>选目录</button>
+            <button on:click={addTemplates} disabled={!configLoaded}>选文件</button>
+            <button on:click={addTemplateDir} disabled={!configLoaded}>选目录</button>
             <button on:click={probeTemplate} disabled={probeLoading || !templatePaths.length}>
               {probeLoading ? '探查中…' : '探查结构'}
             </button>
             {#if templatePaths.length}
-              <button class="ghost" on:click={() => (templatePaths = [])}>清空</button>
+              <button class="ghost" on:click={() => { templatePaths = []; saveWorkspace() }}>清空</button>
             {/if}
           </div>
         </div>
@@ -875,7 +929,7 @@
           {#each templatePaths as p, i}
             <div class="path-item">
               <span class="name">{p}</span>
-              <button class="ghost del" on:click={() => (templatePaths = removeAt(templatePaths, i))}>移除</button>
+              <button class="ghost del" on:click={() => { templatePaths = removeAt(templatePaths, i); saveWorkspace() }}>移除</button>
             </div>
           {/each}
         </div>
@@ -1022,12 +1076,12 @@
         <div class="card-head">
           <div class="card-title">输出</div>
           <div class="row">
-            <button on:click={pickOut}>选择目录</button>
+            <button on:click={pickOut} disabled={!configLoaded}>选择目录</button>
             <button class="ghost" on:click={() => api.OpenOutputDir()}>打开</button>
           </div>
         </div>
         <div class="field" style="margin-bottom:0">
-          <input type="text" bind:value={outputDir} />
+          <input type="text" bind:value={outputDir} on:change={saveWorkspace} disabled={!configLoaded} />
           <div style="font-size:10.5px;color:var(--muted);margin-top:3px">
             结构：<code style="font-family:var(--mono)">&lt;输出目录&gt;/&lt;图案名&gt;/&lt;图案名&gt;_&lt;模板名&gt;_NN.jpg</code>
           </div>

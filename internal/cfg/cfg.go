@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 )
 
@@ -36,9 +37,12 @@ type Config struct {
 	Candidates   []float64 `json:"candidates"`
 
 	// 路径默认值
-	TemplateDir string `json:"template_dir"`
-	PatternDir  string `json:"pattern_dir"`
-	OutputDir   string `json:"output_dir"`
+	TemplateDir       string   `json:"template_dir"`
+	PatternDir        string   `json:"pattern_dir"`
+	OutputDir         string   `json:"output_dir"`
+	PatternPaths      []string `json:"pattern_paths"`
+	TemplatePaths     []string `json:"template_paths"`
+	WorkspaceRevision int64    `json:"workspace_revision"`
 
 	// 套图默认参数
 	Group      string `json:"group"`
@@ -192,9 +196,11 @@ func (s *Store) Get() Config {
 func (s *Store) Update(patch func(*Config)) (Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previous := s.cloneLocked()
 	patch(&s.cur)
 	normalize(&s.cur)
 	if err := s.saveLocked(); err != nil {
+		s.cur = previous
 		return s.cloneLocked(), err
 	}
 	return s.cloneLocked(), nil
@@ -204,6 +210,8 @@ func (s *Store) Update(patch func(*Config)) (Config, error) {
 func (s *Store) cloneLocked() Config {
 	c := s.cur
 	c.Candidates = append([]float64(nil), s.cur.Candidates...)
+	c.PatternPaths = slices.Clone(s.cur.PatternPaths)
+	c.TemplatePaths = slices.Clone(s.cur.TemplatePaths)
 	return c
 }
 

@@ -146,6 +146,10 @@ export function SaveConfig(arg1) {
   return window['go']['main']['App']['SaveConfig'](arg1);
 }
 
+export function SaveWorkspace(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SaveWorkspace'](arg1, arg2, arg3);
+}
+
 export function StartGen(arg1) {
   return window['go']['main']['App']['StartGen'](arg1);
 }
