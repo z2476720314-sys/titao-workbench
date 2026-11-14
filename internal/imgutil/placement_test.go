@@ -2,6 +2,7 @@ package imgutil
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
@@ -32,8 +33,8 @@ func TestNormalizeReportsPaddingWithoutChangingPixels(t *testing.T) {
 	if got.Width != 100 || got.Height != 200 || got.Trimmed || got.ContentBounds != [4]float64{0, .1, 1, .75} {
 		t.Fatalf("canvas or visible bounds changed: %+v", got)
 	}
-	if got.AnchorX != 2 || got.AnchorY != 1 {
-		t.Fatalf("straight cut edges need shell anchors: %+v", got)
+	if got.AnchorX != 2 || got.AnchorY != 0 {
+		t.Fatalf("only edges adjacent to the original canvas need shell anchors: %+v", got)
 	}
 	out, err := Decode(dst)
 	if err != nil {
@@ -72,6 +73,109 @@ func TestCutEdgeAnchorsIgnoreNaturalContours(t *testing.T) {
 	x, y = cutEdgeAnchors(im)
 	if x != 0 || y != 0 {
 		t.Fatalf("half-pixel circular outline acquired anchors: %d,%d", x, y)
+	}
+}
+
+func TestCutEdgeAnchorsTolerateSparsePixelsBeforeStraightEdges(t *testing.T) {
+	im := image.NewNRGBA(image.Rect(0, 0, 945, 1456))
+	draw.Draw(im, image.Rect(5, 5, 938, 1450), image.NewUniform(color.NRGBA{R: 180, A: 255}), image.Point{}, draw.Src)
+	for _, p := range []image.Point{{3, 100}, {4, 101}, {943, 200}, {942, 201}, {100, 3}, {101, 4}, {200, 1455}, {201, 1454}} {
+		im.SetNRGBA(p.X, p.Y, color.NRGBA{R: 180, A: 8})
+	}
+	before := append([]byte(nil), im.Pix...)
+	x, y := cutEdgeAnchors(im)
+	if x != 2 || y != 1 {
+		t.Fatalf("near-edge alpha8 pixels hid sustained cut edges: %d,%d", x, y)
+	}
+	if !bytes.Equal(before, im.Pix) {
+		t.Fatal("anchor detection changed artwork pixels")
+	}
+}
+
+func TestCutEdgeAnchorsIgnoreCirclesAcrossSizesAndCanvasOffsets(t *testing.T) {
+	for _, radius := range []int{20, 100, 500} {
+		for _, offset := range []image.Point{{0, 0}, {700, 1000}} {
+			for _, halfPixel := range []int{0, 1} {
+				t.Run(fmt.Sprintf("r%d_offset%v_half%d", radius, offset, halfPixel), func(t *testing.T) {
+					im := image.NewNRGBA(image.Rect(0, 0, 2*radius+5+offset.X, 2*radius+5+offset.Y))
+					cx, cy := offset.X+radius+2, offset.Y+radius+2
+					for y := cy - radius - 1; y <= cy+radius+1; y++ {
+						for x := cx - radius - 1; x <= cx+radius+1; x++ {
+							dx, dy := 2*(x-cx)-halfPixel, 2*(y-cy)-halfPixel
+							if dx*dx+dy*dy <= 4*radius*radius {
+								im.SetNRGBA(x, y, color.NRGBA{R: 180, A: 255})
+							}
+						}
+					}
+					if x, y := cutEdgeAnchors(im); x != 0 || y != 0 {
+						t.Fatalf("complete circular contour acquired anchors: %d,%d", x, y)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCutEdgeAnchorsRequireOriginalCanvasAdjacency(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rect image.Rectangle
+		x, y int
+	}{
+		{"internal-paper", image.Rect(40, 40, 160, 160), 0, 0},
+		{"left-cut", image.Rect(0, 40, 120, 160), -1, 0},
+		{"right-cut", image.Rect(80, 40, 200, 160), 1, 0},
+		{"top-cut", image.Rect(40, 0, 160, 120), 0, -1},
+		{"bottom-cut", image.Rect(40, 80, 160, 200), 0, 1},
+		{"sides-and-bottom-cut", image.Rect(0, 40, 200, 200), 2, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			im := image.NewNRGBA(image.Rect(0, 0, 200, 200))
+			draw.Draw(im, tc.rect, image.NewUniform(color.NRGBA{R: 180, A: 255}), image.Point{}, draw.Src)
+			if x, y := cutEdgeAnchors(im); x != tc.x || y != tc.y {
+				t.Fatalf("canvas adjacency ignored: got (%d,%d), want (%d,%d)", x, y, tc.x, tc.y)
+			}
+			dir := t.TempDir()
+			src := filepath.Join(dir, "source.png")
+			var encoded bytes.Buffer
+			if err := png.Encode(&encoded, im); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(src, encoded.Bytes(), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, trim := range []bool{false, true} {
+				got, err := Normalize(src, filepath.Join(dir, fmt.Sprintf("normalized-%t.png", trim)), trim)
+				if err != nil || got.AnchorX != tc.x || got.AnchorY != tc.y {
+					t.Fatalf("trim=%t changed source cut semantics: %+v, %v", trim, got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeDoesNotInventCutAnchorsWhenTrimmingInternalPaper(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "internal-paper.png")
+	im := image.NewNRGBA(image.Rect(0, 0, 200, 240))
+	draw.Draw(im, image.Rect(40, 60, 160, 200), image.NewUniform(color.NRGBA{R: 180, A: 255}), image.Point{}, draw.Src)
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = png.Encode(f, im)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, trim := range []bool{false, true} {
+		got, err := Normalize(src, filepath.Join(dir, fmt.Sprintf("normalized-%t.png", trim)), trim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.AnchorX != 0 || got.AnchorY != 0 || got.Trimmed != trim {
+			t.Fatalf("transparent trim invented source-canvas cut edges: %+v", got)
+		}
 	}
 }
 

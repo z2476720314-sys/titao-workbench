@@ -33,49 +33,52 @@ type Config struct {
 
 // Placement 把实际渲染约束与原图一起交给选档和评审。
 type Placement struct {
+	AppliedSummary          string
 	FillTop                 bool
 	AlignBottom             bool
 	FullBleed               bool
 	TransparentPadding      bool
 	AnchorX, AnchorY        int
 	SourceDataURL           string
+	SourceAlphaGuide        bool
+	DiagnosticFirstView     bool
 	Fit                     string
 	NoCrop                  bool
+	KeepWhole               bool
 	Scale, OffsetX, OffsetY float64
 }
 
 func (p Placement) Description() string {
-	scale := "各候选的实际 scale 见编号表"
+	scale := "scale见各候选编号的实际倍率"
 	if p.Scale > 0 {
-		scale = fmt.Sprintf("scale=%.3f", p.Scale)
+		scale = fmt.Sprintf("scale=%.6g", p.Scale)
 	}
-	baseline := "按原比例完整放下"
-	if p.FullBleed {
-		baseline = "按原比例铺满壳面，边缘背景可以略裁，主要内容必须保留"
+	text := fmt.Sprintf("实际已应用参数：fit=%s，no_crop=%t，%s，offset_x=%.6g，offset_y=%.6g。零偏移为基准居中；dx/dy是相对本轮实际壳面画布宽/高的位移增量，正x向右、正y向下，scale_ratio乘当前实际倍率。按被遮深度与安全余量计算联合调整，不固定20%%，不按原图留白或成品照片像素直接换算。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY)
+	text += "只可裁掉全透明空白，浅色或半透明的实际内容也不能越过壳边或画面。主字、主脸及主头部轮廓避开镜头；低对比不等于头部丢失。"
+	if p.KeepWhole {
+		text += "用户已选择保留整幅画面，接受边缘留白，不强制贴壳边或贴底；原图外框作为完整画面保留，不把正常留白判成截边悬空。所有内容仍须留在壳边与画面内，重要文字、主脸和主头部避镜头，不得通过裁背景或拉伸来满铺。"
 	}
-	if p.TransparentPadding {
-		baseline = "按原画布比例初始满铺，可利用透明留白移动主体"
+	text += "模板手指、挂绳和反光不属于镜头遮挡；物理透明壳边框不属于可印刷背板，不应误判为图案留白。"
+	if p.SourceAlphaGuide {
+		text += "原图参考中左幅Art是原图画布与实际比例，右幅Alpha guide仅增强透明度轮廓，不代表实际印刷颜色，也不是成品；按右幅确认浅色主头部轮廓，再对照各成品检查镜头遮挡。"
 	}
-	text := fmt.Sprintf("实际参数：fit=%s，no_crop=%t，%s，offset_x=%.3f，offset_y=%.3f。scale=1 的基准是%s，零偏移为居中，正 x 向右、正 y 向下；位移按图案原始画布方向判断。优先保持基准大小，主要内容被明显裁切或遮挡时调整，保护脸部与关键文字。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY, baseline)
-	if p.NoCrop {
-		text += "只允许透明或空白留边超出壳底，可见图案内容不能越过壳面边界；下移余量不足时适度等比缩小，不能为露出头部而裁掉底部实际内容。"
-	} else {
-		text += "用户允许裁剪：壳边和壳底可自然裁掉背景、装饰或身体边缘；优先保持主体大小并下移，让头部和文字避开镜头，不为保全整幅图案而缩小主体。"
+	if p.DiagnosticFirstView {
+		text += "首个成品角度为同一实际摆放的Alpha可见性诊断：只将弱 alpha 轮廓增强为品红，原本不透明的正文、眼睛和底色保留原色；其余角度为原色成品。该诊断只检查镜头遮挡，不评配色，不能将增强色判成素材变色。"
 	}
-	if p.FillTop {
-		text += "这是一张确认过的满版重复背景，已按2:1画布贴合左右底部，并只续铺顶部缺口。请检查接缝、轮廓和保真，不要建议缩小背景重新制造留白。"
-	}
-	if p.AlignBottom {
-		text += "本图在原画布底部已有实际内容，已自动贴底定位；底部必须贴合壳底，不要为了居中建议上移。主要内容完整且无明显遮挡就通过。"
-	}
-	if p.FullBleed {
-		text += "本图按原画布等比满铺，原有透明或半透明区域及主体位置都是原设计，不能因透明度改成缩小贴纸。只评估主要文字、人物或标志是否明显缺失。头发、帽尖、背景装饰被镜头自然遮住不算主体问题。确有主体问题才微调，调整后仍须满铺，禁止缩小留边。"
+	if p.FullBleed || p.FillTop {
+		text += "满铺是初始构图方式；实际内容越界或主字主脸被挡时允许等比缩小并位移。重复背景纹样被镜头自然遮挡不算缺失，保留重复图案连续性、壳色和透明度。"
 	}
 	if p.TransparentPadding {
-		text += "本图有透明留白，移动边界按可见内容计算，透明画布边缘不锁定主体位置。脸部、头部轮廓或关键文字被镜头遮挡时，优先 down 利用底部透明余量；下移空间不足才 avoid_cam 等比缩小并下移。图案底部若有明显横向截断边，须 down 衔接壳底。独立完整贴纸无须强制贴底，以镜头下方可见背板居中为准。不要仅因原画布居中就放行遮挡。"
+		text += "原图有透明留白，安全边界按实际内容计算，透明画布边缘不锁定主体位置；可联合缩放与横纵移动，完整独立贴纸不强制贴底。"
 	}
-	if p.AnchorX != 0 || p.AnchorY != 0 {
-		text += fmt.Sprintf("检测到明显直线截断边，已固定贴边锚点 anchor_x=%d、anchor_y=%d（负值为左/上，正值为右/下；x=2为左右同时贴边，此时不缩小宽度）。缩放后仍贴住该壳边，不要建议把截断边移到壳面内部悬空。", p.AnchorX, p.AnchorY)
+	if p.AlignBottom && !p.KeepWhole {
+		text += "当前已按实际内容贴底；若底部是明确直线截断边，缩放后仍须贴壳底，自然曲线不强制贴底。"
+	}
+	if !p.KeepWhole && (p.AnchorX != 0 || p.AnchorY != 0) {
+		text += fmt.Sprintf("明确截断边锚点：anchor_x=%d、anchor_y=%d（负为左/上，正为右/下，x=2为左右同时贴边）；调整后截断边仍须贴对应壳边，不得悬空。若与内容完整或避镜头约束冲突，报告不合格与冲突，不强行越界。", p.AnchorX, p.AnchorY)
+	}
+	if p.AppliedSummary != "" {
+		text += "\n" + p.AppliedSummary
 	}
 	return text
 }
@@ -107,7 +110,7 @@ const promptTemplate = `你是手机壳商品图评审。这是同一个图案�
 %s
 
 按下面的标准挑出最好的一张：
-1. 对照原图案保护主体、比例、方向、透明区域与细节。原图透明区域用白底预览，不代表要在壳上印白色矩形。原图已有的平直底边不应悬在壳面中间形成贴纸截边。
+1. 对照原图案保护主体、比例、方向、透明区域与细节。原图透明区域用白底预览，不代表要在壳上印白色矩形。原图已有的平直底边不应悬在壳面中间形成贴纸截边；本款说明若明确用户接受整幅留白，则按该例外，不强制贴壳边。
 2. 优先保持原比例、基准大小和居中；主要内容完整且无明显遮挡就合格。独立文字、数字和标志允许正常留白；底部确有需要接壳底的连续场景内容且悬空时可以小幅下移，不要为更饱满而缩放。
 3. 摄像头、边框、手指自然遮挡背景装饰是正常实物关系，不要为了躲开整个镜头区域把整幅图缩小。关键人物脸部或文字被镜头遮挡才需避让。
 4. 透明孔洞露出壳色、壳体边框、相机开孔与拍摄透视不是图案缺失，不要求图案覆盖这些区域。

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,7 +20,12 @@ import (
 	"titao/internal/psx"
 )
 
-type Session struct{ Path string }
+type Session struct {
+	Path      string
+	mu        sync.Mutex
+	cacheRoot string
+	prepared  map[string]*preparedTemplate
+}
 
 func New(path string) *Session {
 	if path == "" {
@@ -46,7 +52,19 @@ func (s *Session) Probe() (string, error) {
 
 // Each render owns a private headless process; desktop documents are never touched.
 func (s *Session) CloseAllDocs() error { return nil }
-func (s *Session) Close() error        { return nil }
+func (s *Session) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cacheRoot == "" {
+		return nil
+	}
+	err := os.RemoveAll(s.cacheRoot)
+	if err == nil {
+		s.cacheRoot = ""
+		s.prepared = nil
+	}
+	return err
+}
 
 type client struct {
 	enc *json.Encoder
@@ -55,9 +73,17 @@ type client struct {
 }
 
 func (s *Session) connect(root string) (*client, func(), error) {
+	return s.connectAt(root, root)
+}
+
+func (s *Session) connectAt(root, processRoot string) (*client, func(), error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	cmd := exec.CommandContext(ctx, s.Path, "mcp", "--automation-read-root", root, "--automation-write-root", root)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if processRoot != "" {
+		cmd.Env = privateTempEnv(processRoot)
+		cmd.Dir = processRoot
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	in, err := cmd.StdinPipe()
@@ -76,7 +102,27 @@ func (s *Session) connect(root string) (*client, func(), error) {
 		cancel()
 		return nil, nil, err
 	}
-	close := func() { in.Close(); cancel(); _ = cmd.Wait() }
+	if processRoot != "" {
+		_ = recordProcess(processRoot, cmd, "started", nil)
+	}
+	wait := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		if processRoot != "" {
+			_ = recordProcess(processRoot, cmd, "exited", err)
+		}
+		wait <- err
+	}()
+	close := func() {
+		in.Close()
+		select {
+		case <-wait:
+		case <-time.After(2 * time.Second):
+			cancel()
+			<-wait
+		}
+		cancel()
+	}
 	c := &client{enc: json.NewEncoder(in), dec: json.NewDecoder(out)}
 	var result json.RawMessage
 	if err = c.rpc("initialize", map[string]any{"protocolVersion": "2024-11-05", "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "titao", "version": "1"}}, &result); err != nil {
@@ -144,7 +190,8 @@ func (c *client) command(id string, params any, out any) error {
 }
 
 type contents struct {
-	ID int `json:"id"`
+	ID        int `json:"id"`
+	Instances int `json:"instances"`
 }
 type layer struct {
 	ID            int       `json:"id"`
@@ -155,6 +202,7 @@ type layer struct {
 	Blend         string    `json:"blend"`
 	Children      []layer   `json:"children"`
 	SmartContents *contents `json:"smartContents"`
+	Bounds        []float64 `json:"bounds"`
 }
 type document struct {
 	Width  int     `json:"width"`
@@ -284,7 +332,68 @@ func placementCenter(req psx.RenderRequest, cw, ch int, w, h float64) (float64, 
 	return x, y
 }
 
+// legacyPlacement reports the applied transform in the selected fit's unanchored scale basis.
+func legacyPlacement(req psx.RenderRequest, desired float64, cw, ch, pw, ph int, sx, sy, x, y float64) (psx.AppliedPlacement, error) {
+	base := req
+	base.NoCrop, base.AnchorX, base.AnchorY = false, 0, 0
+	bx, by, err := placementScale(base, 1, cw, ch, pw, ph)
+	if err != nil {
+		return psx.AppliedPlacement{}, err
+	}
+	sx, sy = sx/bx, sy/by
+	p := psx.AppliedPlacement{Scale: sx, OffsetX: x/float64(cw) - 0.5, OffsetY: y/float64(ch) - 0.5}
+	if sx <= 0 || math.IsNaN(sx) || math.IsInf(sx, 0) || math.IsNaN(sy) || math.IsInf(sy, 0) || math.Abs(sx-sy) > 1e-9*math.Max(sx, sy) || math.IsNaN(p.OffsetX) || math.IsInf(p.OffsetX, 0) || math.IsNaN(p.OffsetY) || math.IsInf(p.OffsetY, 0) {
+		return p, fmt.Errorf("PhotoCraft legacy 无法用当前 fit 的单一倍率表达实际摆放")
+	}
+	p.Constrained = math.Abs(p.Scale-desired) > 1e-9 || math.Abs(p.OffsetX-req.OffsetX) > 1e-9 || math.Abs(p.OffsetY-req.OffsetY) > 1e-9
+	return p, nil
+}
+
+func legacyMetadata(req psx.RenderRequest, doc document, applied map[int]psx.AppliedPlacement) (psx.RenderMetadata, error) {
+	metadata := psx.RenderMetadata{FrameVerified: false}
+	objects, err := visibleObjects(doc.Layers, req.Group)
+	if err != nil {
+		return metadata, err
+	}
+	cellSize := req.CellSize
+	if cellSize == 0 {
+		cellSize = doc.Width
+	}
+	if cellSize <= 0 || doc.Height <= 0 || doc.Height%cellSize != 0 {
+		return metadata, fmt.Errorf("PhotoCraft legacy 照片格尺寸无效")
+	}
+	seen := map[int]bool{}
+	for _, l := range objects {
+		if len(l.Bounds) != 4 || l.Bounds[2] <= 0 || l.Bounds[3] <= 0 {
+			return metadata, fmt.Errorf("PhotoCraft legacy 智能对象缺少有效外层范围")
+		}
+		for _, bound := range l.Bounds {
+			if math.IsNaN(bound) || math.IsInf(bound, 0) {
+				return metadata, fmt.Errorf("PhotoCraft legacy 智能对象外层范围无效")
+			}
+		}
+		cell := int(math.Floor((l.Bounds[1] + l.Bounds[3]/2) / float64(cellSize)))
+		p, ok := applied[l.SmartContents.ID]
+		if !ok || cell < 0 || cell >= doc.Height/cellSize || seen[cell] {
+			return metadata, fmt.Errorf("PhotoCraft legacy 实际摆放无法与照片格一一对应")
+		}
+		seen[cell] = true
+		p.Cell = cell
+		metadata.Placements = append(metadata.Placements, p)
+	}
+	return metadata, nil
+}
+
 func (s *Session) Render(req psx.RenderRequest) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if req.NoCrop {
+		return s.renderVisible(req)
+	}
+	return s.renderLegacy(req)
+}
+
+func (s *Session) renderLegacy(req psx.RenderRequest) (string, error) {
 	c, close, err := s.connect(req.OutDir)
 	if err != nil {
 		return "", err
@@ -301,7 +410,7 @@ func (s *Session) Render(req psx.RenderRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	type surface struct{ ID, W, H int }
+	type surface struct{ ID, ContentsID, W, H int }
 	surfaces := make([]surface, 0, len(objects))
 	for _, l := range objects {
 		if err = c.command("layer.smartObjects.editContents", map[string]any{"layer": l.ID}, nil); err != nil {
@@ -311,7 +420,7 @@ func (s *Session) Render(req psx.RenderRequest) (string, error) {
 		if err = c.call("doc_inspect", map[string]any{}, &inner); err != nil {
 			return "", err
 		}
-		surfaces = append(surfaces, surface{l.ID, inner.Width, inner.Height})
+		surfaces = append(surfaces, surface{l.ID, l.SmartContents.ID, inner.Width, inner.Height})
 		if err = c.call("doc_close", map[string]any{}, nil); err != nil {
 			return "", err
 		}
@@ -325,11 +434,18 @@ func (s *Session) Render(req psx.RenderRequest) (string, error) {
 	}
 	pb := pat.Bounds()
 	for i, t := range req.Scales {
+		applied := map[int]psx.AppliedPlacement{}
 		for _, v := range surfaces {
 			sx, sy, err := placementScale(req, t, v.W, v.H, pb.Dx(), pb.Dy())
 			if err != nil {
 				return "", err
 			}
+			x, y := placementCenter(req, v.W, v.H, float64(pb.Dx())*sx, float64(pb.Dy())*sy)
+			p, err := legacyPlacement(req, t, v.W, v.H, pb.Dx(), pb.Dy(), sx, sy, x, y)
+			if err != nil {
+				return "", err
+			}
+			applied[v.ContentsID] = p
 			var created struct {
 				Document int `json:"document"`
 			}
@@ -339,7 +455,6 @@ func (s *Session) Render(req psx.RenderRequest) (string, error) {
 			var placed struct {
 				Layer int `json:"layer"`
 			}
-			x, y := placementCenter(req, v.W, v.H, float64(pb.Dx())*sx, float64(pb.Dy())*sy)
 			if err = c.call("doc_place", map[string]any{"path": req.Pattern, "fit": false, "scale": sx * 100, "center": []float64{x, y}}, &placed); err != nil {
 				return "", err
 			}
@@ -372,12 +487,29 @@ func (s *Session) Render(req psx.RenderRequest) (string, error) {
 				return "", fmt.Errorf("PhotoCraft 导出为空: %w", err)
 			}
 		}
+		metadata, err := legacyMetadata(req, doc, applied)
+		if err != nil {
+			return "", err
+		}
+		data, err := json.Marshal(metadata)
+		if err != nil {
+			return "", err
+		}
+		tmp := req.MetadataPath(i) + ".tmp"
+		if err := os.WriteFile(tmp, data, 0600); err != nil {
+			return "", err
+		}
+		if err := os.Rename(tmp, req.MetadataPath(i)); err != nil {
+			_ = os.Remove(tmp)
+			return "", err
+		}
 	}
 	return fmt.Sprintf("PhotoCraft: %d 个独立智能对象，%d 档候选", len(surfaces), len(req.Scales)), nil
 }
 
 func (s *Session) ProbeTemplate(path string) (*psx.TemplateInfo, error) {
-	c, close, err := s.connect(filepath.Dir(path))
+	// Inspection must not create logs or scratch files in the user's template folder.
+	c, close, err := s.connectAt(filepath.Dir(path), "")
 	if err != nil {
 		return nil, err
 	}

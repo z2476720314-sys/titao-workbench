@@ -257,6 +257,10 @@ export namespace jobs {
 	    completion_key?: string;
 	    id: number;
 	    pattern: string;
+	    original_pattern?: string;
+	    original_sha256?: string;
+	    prepared_sha256?: string;
+	    keep_whole?: boolean;
 	    template: string;
 	    pattern_name: string;
 	    template_name: string;
@@ -268,6 +272,7 @@ export namespace jobs {
 	    message?: string;
 	    judge_note?: string;
 	    tune_rounds?: number;
+	    tune_history?: tuner.Round[];
 	
 	    static createFrom(source: any = {}) {
 	        return new QueueTask(source);
@@ -278,6 +283,10 @@ export namespace jobs {
 	        this.completion_key = source["completion_key"];
 	        this.id = source["id"];
 	        this.pattern = source["pattern"];
+	        this.original_pattern = source["original_pattern"];
+	        this.original_sha256 = source["original_sha256"];
+	        this.prepared_sha256 = source["prepared_sha256"];
+	        this.keep_whole = source["keep_whole"];
 	        this.template = source["template"];
 	        this.pattern_name = source["pattern_name"];
 	        this.template_name = source["template_name"];
@@ -289,7 +298,26 @@ export namespace jobs {
 	        this.message = source["message"];
 	        this.judge_note = source["judge_note"];
 	        this.tune_rounds = source["tune_rounds"];
+	        this.tune_history = this.convertValues(source["tune_history"], tuner.Round);
 	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class Queue {
 	    version: number;
@@ -338,6 +366,10 @@ export namespace jobs {
 	    fillTop?: boolean;
 	    id: number;
 	    pattern: string;
+	    originalPattern?: string;
+	    originalSha256?: string;
+	    preparedSha256?: string;
+	    keepWhole?: boolean;
 	    patternName: string;
 	    template: string;
 	    templateName: string;
@@ -350,6 +382,7 @@ export namespace jobs {
 	    chosenScale: number;
 	    judgeNote: string;
 	    tuneRounds: number;
+	    tuneHistory?: tuner.Round[];
 	    elapsedMs: number;
 	
 	    static createFrom(source: any = {}) {
@@ -361,6 +394,10 @@ export namespace jobs {
 	        this.fillTop = source["fillTop"];
 	        this.id = source["id"];
 	        this.pattern = source["pattern"];
+	        this.originalPattern = source["originalPattern"];
+	        this.originalSha256 = source["originalSha256"];
+	        this.preparedSha256 = source["preparedSha256"];
+	        this.keepWhole = source["keepWhole"];
 	        this.patternName = source["patternName"];
 	        this.template = source["template"];
 	        this.templateName = source["templateName"];
@@ -373,8 +410,27 @@ export namespace jobs {
 	        this.chosenScale = source["chosenScale"];
 	        this.judgeNote = source["judgeNote"];
 	        this.tuneRounds = source["tuneRounds"];
+	        this.tuneHistory = this.convertValues(source["tuneHistory"], tuner.Round);
 	        this.elapsedMs = source["elapsedMs"];
 	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }
@@ -472,6 +528,30 @@ export namespace main {
 
 export namespace psx {
 	
+	export class AppliedPlacement {
+	    Scale: number;
+	    OffsetX: number;
+	    OffsetY: number;
+	    Cell: number;
+	    Constrained: boolean;
+	    AnchorUnmet: boolean;
+	    AnchorImpossible: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new AppliedPlacement(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.Scale = source["Scale"];
+	        this.OffsetX = source["OffsetX"];
+	        this.OffsetY = source["OffsetY"];
+	        this.Cell = source["Cell"];
+	        this.Constrained = source["Constrained"];
+	        this.AnchorUnmet = source["AnchorUnmet"];
+	        this.AnchorImpossible = source["AnchorImpossible"];
+	    }
+	}
 	export class ArtGroup {
 	    group: string;
 	    psbs: string[];
@@ -538,6 +618,57 @@ export namespace psx {
 	        this.artGroups = this.convertValues(source["artGroups"], ArtGroup);
 	    }
 	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
+export namespace tuner {
+
+	export class Round {
+	    applied?: psx.AppliedPlacement[];
+	    Index: number;
+	    Scale: number;
+	    OffsetX: number;
+	    OffsetY: number;
+	    Score: number;
+	    Problem: string;
+	    Good: boolean;
+	    camera_clear: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new Round(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.applied = this.convertValues(source["applied"], psx.AppliedPlacement);
+	        this.Index = source["Index"];
+	        this.Scale = source["Scale"];
+	        this.OffsetX = source["OffsetX"];
+	        this.OffsetY = source["OffsetY"];
+	        this.Score = source["Score"];
+	        this.Problem = source["Problem"];
+	        this.Good = source["Good"];
+	        this.camera_clear = source["camera_clear"];
+	    }
+
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;

@@ -1,12 +1,33 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"titao/internal/psx"
 )
+
+func TestStrictNoCropDoesNotOpenDefaultPhotoshop(t *testing.T) {
+	for _, renderer := range []string{"", "photoshop"} {
+		opens := 0
+		l := &lazyEditor{renderer: renderer, open: func() (editorSession, string, error) { opens++; return &stubEditor{}, "Photoshop", nil }}
+		if _, err := l.Render(psx.RenderRequest{NoCrop: true}); opens != 0 || !errors.Is(err, psx.ErrStrictNoCropUnsupported) {
+			t.Fatalf("renderer=%q unsupported request opened editor: opens=%d err=%v", renderer, opens, err)
+		}
+	}
+}
+
+func TestStrictPhotoCraftStillInitializes(t *testing.T) {
+	opens := 0
+	inner := &stubEditor{}
+	l := &lazyEditor{renderer: "photocraft", open: func() (editorSession, string, error) { opens++; return inner, "PhotoCraft", nil }}
+	defer l.Close()
+	if _, err := l.Render(psx.RenderRequest{NoCrop: true}); err != nil || opens != 1 || inner.renders != 1 {
+		t.Fatalf("PhotoCraft path changed: opens=%d renders=%d err=%v", opens, inner.renders, err)
+	}
+}
 
 type stubEditor struct{ renders, closes int }
 

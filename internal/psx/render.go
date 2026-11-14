@@ -2,6 +2,7 @@ package psx
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -11,7 +12,7 @@ import (
 // 实测结论（标尺实验）：模板的智能对象变换已经把 945x1890 的画布映射到壳面，
 // 满格图案按画布 1:1 置入正好铺满。但画布 1:1 只对满格图案成立：
 // 宽扁图案（如 945x574）在 1:1 时宽度已顶满壳面，再放大就横向裁掉设计元素。
-// 因此 auto 统一采用 contain 语义（= 完整放下），保证图案整体可见。
+// 因此 auto 采用 contain 画布缩放；最终照片画面的严格可见性由 PhotoCraft 校准。
 const (
 	FitAuto    = "auto"    // 完整放下为基准（默认，推荐；等价 contain）
 	FitContain = "contain" // 以「完整放下」为基准
@@ -37,15 +38,20 @@ type RenderRequest struct {
 	OffsetY float64
 	// OutDir 是拼合图输出目录，脚本会写入 flat_0.png…flat_N.png。
 	OutDir string
-	// NoCrop 为 true 时把缩放硬性限制在「完整放下」以内（T 超过 1 会被压回 1），
-	// 保证图案任何可见部分都不会被壳边裁掉。cover / stretch 不受影响。
+	// NoCrop 要求图案内容同时不被壳边和最终照片画面裁掉。
+	// 当前仅 PhotoCraft 提供校准及实际摆放元数据；Photoshop 在开工前明确拒绝。
 	NoCrop bool
-	// AlignBottom preserves artwork that reaches the original canvas bottom.
+	// DiagnosticAlpha exports a magenta visibility copy using the same strict placement.
+	DiagnosticAlpha bool
+	// PreferOffsets lets later unanchored tuning shrink to realize its requested translation.
+	PreferOffsets bool
+	// AlignBottom is the legacy bottom-origin flag; strict placement uses AnchorY.
 	AlignBottom bool
 	// ContentBounds permits automatic placement within transparent canvas margins.
 	// Coordinates are normalized; zero keeps the existing whole-canvas constraints.
 	ContentBounds    [4]float64
 	AnchorX, AnchorY int
+	CellSize         int
 	// PSVersion 是 Photoshop 版本号，用于版本自适应能力校验。
 	//
 	// 留空时由 Render 从当前会话实时读取（每次渲染多一次 COM 属性读取），
@@ -56,6 +62,19 @@ type RenderRequest struct {
 // FlatPath 返回第 i 档拼合图的路径。
 func (r RenderRequest) FlatPath(i int) string {
 	return fmt.Sprintf("%s/flat_%d.png", strings.ReplaceAll(r.OutDir, "\\", "/"), i)
+}
+
+func (r RenderRequest) DiagnosticFlatPath(i int) string {
+	return fmt.Sprintf("%s/diagnostic_flat_%d.png", strings.ReplaceAll(r.OutDir, "\\", "/"), i)
+}
+
+func (r RenderRequest) MetadataPath(i int) string {
+	return fmt.Sprintf("%s/placement_%d.json", strings.ReplaceAll(r.OutDir, "\\", "/"), i)
+}
+
+type RenderMetadata struct {
+	FrameVerified bool               `json:"frame_verified"`
+	Placements    []AppliedPlacement `json:"placements"`
 }
 
 // TemplateInfo 是模板的结构探查结果。
@@ -381,7 +400,13 @@ const jsxRender = `(function(){
 // Render 按各档缩放渲染整幅拼合图，返回脚本日志。
 //
 // 一次 PS 会话出全部候选，避免反复开关文档。
+// ErrStrictNoCropUnsupported is shared by lazy startup and the Photoshop renderer.
+var ErrStrictNoCropUnsupported = errors.New("Photoshop 尚不支持最终照片画面的严格不裁切校验；请在设置中将渲染器切换为 PhotoCraft 后重试")
+
 func (s *Session) Render(req RenderRequest) (string, error) {
+	if req.NoCrop {
+		return "", ErrStrictNoCropUnsupported
+	}
 	// 版本自适应前置校验：先把「这个 PS 到底能不能跑」问清楚，
 	// 再决定要不要开模板。缺能力时立刻返回中文错误，好过脚本报 8800 或挂死。
 	ver := req.PSVersion

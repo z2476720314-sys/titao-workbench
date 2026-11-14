@@ -239,32 +239,41 @@ func completionKey(opt Options, def cfg.Config, t *Task) (string, error) {
 		return "", err
 	}
 	opt = effectiveJobOptions(opt, def)
+	if t.KeepWhole {
+		opt.NoCrop = true
+	}
 	reviewOn, rounds := effectiveReviewSettings(opt, def)
 	output, err := normalizedCompletionPath(filepath.Join(opt.OutputDir, t.PatternName))
 	if err != nil {
 		return "", err
 	}
+	boundaryVersion := 0
+	if opt.NoCrop {
+		boundaryVersion = 1
+	}
 	data, err := json.Marshal(struct {
-		Pattern      completionInput
-		Template     completionInput
-		Output       string
-		PatternName  string
-		TemplateName string
-		Group        string
-		Fit          string
-		Scales       []float64
-		Auto         bool
-		ReviewOn     bool
-		MaxRounds    int
-		TrimAlpha    bool
-		NoCrop       bool
-		OffsetX      float64
-		OffsetY      float64
-		CellSize     int
-		JPGQuality   int
+		Pattern                completionInput
+		Template               completionInput
+		Output                 string
+		PatternName            string
+		TemplateName           string
+		Group                  string
+		Fit                    string
+		Scales                 []float64
+		Auto                   bool
+		ReviewOn               bool
+		MaxRounds              int
+		TrimAlpha              bool
+		NoCrop                 bool
+		OffsetX                float64
+		OffsetY                float64
+		CellSize               int
+		JPGQuality             int
+		VisibleBoundaryVersion int  `json:"visible_boundary_version,omitempty"`
+		KeepWhole              bool `json:"keep_whole,omitempty"`
 	}{pattern, template, output, t.PatternName, t.TemplateName, opt.Group, opt.Fit,
 		opt.Scales, opt.Auto, reviewOn, rounds, opt.TrimAlpha, opt.NoCrop, opt.OffsetX, opt.OffsetY,
-		opt.CellSize, opt.JPGQuality})
+		opt.CellSize, opt.JPGQuality, boundaryVersion, t.KeepWhole})
 	if err != nil {
 		return "", err
 	}
@@ -363,6 +372,10 @@ func (f *completionFile) seedQueue(q *Queue, def cfg.Config) bool {
 				continue
 			}
 		} else {
+			// A file timestamp cannot prove that old strict outputs protected the final photograph.
+			if q.Options.NoCrop {
+				continue
+			}
 			// shortcut: 旧版没有开工指纹，按正常文件时间比较；需内容校验时升级为内容哈希。
 			pat, _ := os.Stat(t.Pattern)
 			tpl, _ := os.Stat(t.Template)
@@ -401,6 +414,9 @@ func (e *Engine) Plan(opt Options) ([]*Task, error) {
 	if strings.TrimSpace(effectiveJobOptions(opt, def).OutputDir) == "" {
 		return nil, fmt.Errorf("请先选择输出目录")
 	}
+	if err := e.prepareTaskInputs(tasks); err != nil {
+		return nil, err
+	}
 	e.completionMu.Lock()
 	defer e.completionMu.Unlock()
 	f, err := e.loadCompletionHistory(def)
@@ -410,11 +426,16 @@ func (e *Engine) Plan(opt Options) ([]*Task, error) {
 	var pending []*Task
 	resolvedHistory := false
 	selected := map[string]bool{}
+	seenKeys := map[string]bool{}
 	for _, task := range tasks {
 		key, err := completionKey(opt, def, task)
 		if err != nil {
 			return nil, fmt.Errorf("计算完成指纹: %w", err)
 		}
+		if seenKeys[key] {
+			continue
+		}
+		seenKeys[key] = true
 		if rec, ok := f.Records[key]; ok {
 			if rec.valid() {
 				continue
@@ -449,6 +470,9 @@ func (e *Engine) recordCompletion(opt Options, def cfg.Config, t *Task) error {
 	}
 	if _, valid := completionOutputs(t.Files); !valid {
 		return nil
+	}
+	if err := e.validatePreparedTask(t); err != nil {
+		return err
 	}
 	key, err := completionKey(opt, def, t)
 	if err != nil {

@@ -751,7 +751,7 @@
   }
 
   const FIT_OPTS = [
-    { v: 'auto', label: 'auto · 原画布满铺（推荐）', hint: '保留透明度和原构图，先满铺再检查主体' },
+    { v: 'auto', label: 'auto · 原画布等比摆放（推荐）', hint: '保留透明度和原构图，按不裁切设置确定边界' },
     { v: 'contain', label: 'contain · 完整放下', hint: '同 auto，显式指定' },
     { v: 'cover', label: 'cover · 铺满', hint: '以铺满为基准' },
     { v: 'stretch', label: 'stretch · 拉伸变形', hint: '不保持宽高比' },
@@ -981,7 +981,7 @@
               <span style="color:var(--text);font-size:12px">视觉模型自动判断图案大小</span>
             </label>
             <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-              所有图案先按原画布等比满铺，保留透明度和原构图；主要内容确有问题才微调。
+              保留原画布、比例和透明度；开启不裁切时按照片可见边界摆放，再检查文字与主体遮挡。
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
@@ -1015,7 +1015,7 @@
                 <span class="lbl">手动档位（留空=用模型或配置里的候选）</span>
                 <input type="text" bind:value={manualScale} placeholder="例如 0.95,1.05,1.15" />
                 <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-                  1.0 = 图案完整放下（不裁切上限），&lt;1 留白，&gt;1 会超出壳面被裁。填了就不调模型。
+                  1.0 = 完整放下的基准；开启不裁切时按实际边界收敛。填写后不调模型。
                 </div>
               </div>
               <div class="field">
@@ -1054,7 +1054,7 @@
                 <span style="color:var(--text);font-size:12px">图案必须完整可见（不裁切）</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                自动满铺可略裁边缘背景，主要内容不完整会提示复核；手动完整放下时限制放大。
+                只允许全透明留白越界，浅色和半透明内容也受保护；严格照片边界校验需要 PhotoCraft。
               </div>
             </div>
 
@@ -1064,7 +1064,7 @@
                 <span style="color:var(--text);font-size:12px">手动模式裁掉图案透明留白</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                自动满铺保留原图画布及主体位置；手动模式可裁掉四周透明留白。
+                自动模式保留原图画布；手动模式可裁掉四周全透明留白。
               </div>
             </div>
           </div>
@@ -1866,8 +1866,8 @@
         <ol style="margin:0;padding-left:18px;font-size:12px;line-height:1.85;color:#c8cad0">
           <li>模板 TIF 复制到临时目录，<b>原文件永不打开或修改</b>。</li>
           <li>进入「插画」组里每个智能对象内部的 PSB，隐藏原有图层后置入图案并居中。</li>
-          <li>多个格子共享同一个 PSB 源时只替换一次，关联格一起更新（同款图案的不同手持角度）。</li>
-          <li>所有图案先按原画布等比满铺，保留透明度和原构图；主要内容有实际问题才微调。</li>
+          <li>PhotoCraft 不裁切模式会独立处理每个照片角度，校准壳面与照片画面的可见边界。</li>
+          <li>按原画布等比摆放，检查文字、主体和截断边；需要时联合缩放与移动，约束冲突保留人工复核。</li>
           <li>按每 <span class="mono">{cellSize}px</span> 一格切格，导出高质量 JPG。</li>
         </ol>
       </section>
@@ -1877,14 +1877,14 @@
         <table>
           <thead><tr><th style="width:100px">t</th><th>效果</th></tr></thead>
           <tbody>
-            <tr><td class="mono">1.0</td><td>图案完整放下，至少一个方向顶到壳边（不裁切上限）</td></tr>
+            <tr><td class="mono">1.0</td><td>以完整放下为基准，再按实际可见边界调整</td></tr>
             <tr><td class="mono">&lt; 1.0</td><td>留白，图案变小</td></tr>
-            <tr><td class="mono">&gt; 1.0</td><td>超出壳面，被裁切</td></tr>
+            <tr><td class="mono">&gt; 1.0</td><td>请求放大；开启不裁切时仍受实际内容边界限制</td></tr>
           </tbody>
         </table>
         <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.7">
-          模板的智能对象变换已经把图案画布映射到壳面，所以按「完整放下」置入在每一格都能贴合壳面，
-          包括横向倾斜的手持格。这也是 <b>auto</b> 成为推荐值的原因。
+          智能对象画布完整，不代表最终照片没有裁切。PhotoCraft 不裁切模式同时检查壳面和照片画面，
+          不能同时满足内容完整与贴边时会提示人工复核。
         </div>
       </section>
 

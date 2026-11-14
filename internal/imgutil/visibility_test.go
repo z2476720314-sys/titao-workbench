@@ -3,13 +3,10 @@ package imgutil
 import (
 	"image"
 	"image/color"
-	"image/png"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
-func TestNormalizeIgnoresDistantNearlyInvisibleResidue(t *testing.T) {
+func TestAlphaBoundsIgnoresDistantNearlyInvisibleResidue(t *testing.T) {
 	im := image.NewNRGBA(image.Rect(0, 0, 100, 100))
 	for y := 30; y < 70; y++ {
 		for x := 40; x < 60; x++ {
@@ -19,25 +16,11 @@ func TestNormalizeIgnoresDistantNearlyInvisibleResidue(t *testing.T) {
 	im.SetNRGBA(0, 0, color.NRGBA{255, 0, 0, 1})
 	im.SetNRGBA(99, 99, color.NRGBA{255, 0, 0, 1})
 	im.SetNRGBA(39, 50, color.NRGBA{200, 100, 50, 4})
-	dir := t.TempDir()
-	src := filepath.Join(dir, "source.png")
-	dst := filepath.Join(dir, "normalized.png")
-	f, err := os.Create(src)
-	if err != nil {
-		t.Fatal(err)
+	box, ok := alphaBounds(im)
+	if !ok || box.Dx() >= 50 || box.Dy() >= 60 {
+		t.Fatalf("residue controls placement bounds: %v %v", box, ok)
 	}
-	if err := png.Encode(f, im); err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	r, err := Normalize(src, dst, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Width >= 50 || r.Height >= 60 {
-		t.Fatalf("residue controls placement bounds: %dx%d", r.Width, r.Height)
-	}
-	if r.OrigBBox == nil || r.OrigBBox.X0 > 39 {
+	if box.Min.X > 39 {
 		t.Fatal("nearby soft edge was removed")
 	}
 }

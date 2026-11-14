@@ -1,10 +1,26 @@
 package psx
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestPhotoshopStrictNoCropRequiresPhotoCraftBeforeCOM(t *testing.T) {
+	s := &Session{closed: true}
+	log, err := s.Render(RenderRequest{NoCrop: true, PSVersion: "27.7.0"})
+	if log != "" || !errors.Is(err, ErrStrictNoCropUnsupported) || !strings.Contains(err.Error(), "PhotoCraft") || !strings.Contains(err.Error(), "切换") {
+		t.Fatalf("strict request did not explain supported renderer before COM: log=%q err=%v", log, err)
+	}
+}
+
+func TestPhotoshopLegacyNoCropFalseStillUsesExistingSession(t *testing.T) {
+	s := &Session{closed: true}
+	if _, err := s.Render(RenderRequest{NoCrop: false, PSVersion: "27.7.0", Scales: []float64{1}}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("legacy no-crop=false no longer follows COM session path: %v", err)
+	}
+}
 
 // TestEscapePathEscapesQuotes 守住「路径含双引号会提前结束 JSX 字符串字面量」。
 // 旧实现只转义反斜杠，路径里的 " 会让整段 JSX 变成语法错误，
@@ -82,10 +98,7 @@ func TestCheckRenderLogBothKinds(t *testing.T) {
 	}
 }
 
-// TestRenderJSXHonoursNoCrop 守住「禁止裁切」开关确实进了 JSX。
-//
-// 模板里的 NOCROP 分支会把 T>1 压回 s0（完整放下），若不传或传错字面量，
-// 开关就成摆设——宽扁图案仍会被横向裁掉。
+// 历史 JSX 保留画布级缩放限制；这不等于最终照片画面的严格不裁切验证。
 func TestRenderJSXHonoursNoCrop(t *testing.T) {
 	for _, want := range []bool{true, false} {
 		got := strings.ReplaceAll(jsxRender, "__NOCROP__", fmt.Sprintf("%t", want))

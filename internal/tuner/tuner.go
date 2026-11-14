@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"titao/internal/judge"
+	"titao/internal/psx"
 )
 
 // Config 是视觉模型配置（与 judge.Config 同源）。
@@ -43,16 +44,19 @@ type Config struct {
 
 // Advice 是模型对一张成品的评审结论。
 type Advice struct {
-	Usage *judge.TokenUsage `json:"-"`
+	Usage     *judge.TokenUsage `json:"-"`
+	Transform *Adjustment       `json:"-"`
 	// Good 表示这张已经够好，不需要再迭代。
 	Good bool `json:"good"`
-	// Score 是 0~100 的综合分（饱满度、居中、不压摄像头、不裁切）。
+	// CameraClear 仅判断本轮文字、主脸及主头部是否避开镜头，不包含贴边质量。
+	CameraClear bool `json:"camera_clear"`
+	// Score 是 0~100 的综合分（内容完整、主字主脸避镜头、截断边贴边）。
 	Score int `json:"score"`
 	// Problem 是主要问题的一句话描述。
 	Problem string `json:"problem"`
-	// Direction 是调整方向，取值见下面常量。
+	// Direction 为旧协议方向或新协议派生的 DirTransform。
 	Direction string `json:"direction"`
-	// Step 是调整幅度，0.05~0.3，缺省 0.1。
+	// Step 仅用于旧协议，0.05~0.3，缺省 0.1。
 	Step float64 `json:"step"`
 	// Raw 是模型原始输出，便于排查。
 	Raw string `json:"-"`
@@ -60,6 +64,11 @@ type Advice struct {
 	Fallback bool `json:"-"`
 	// Err 是失败原因（Fallback 为 true 时非空）。
 	Err error `json:"-"`
+}
+
+// Adjustment 是相对本轮实际壳面画布的位移增量与实际倍率的乘数。
+type Adjustment struct {
+	DX, DY, ScaleRatio float64
 }
 
 // 调整方向常量。
@@ -72,22 +81,17 @@ const (
 	DirLeft      = "left"      // 重心偏右，左移
 	DirRight     = "right"     // 重心偏左，右移
 	DirAvoidCame = "avoid_cam" // 压到摄像头，需要缩放或位移避让
+	DirTransform = "transform" // 同轮联合位移与等比缩放
 )
 
-const promptTemplate = `你是手机壳印刷摆放检查员。附图第一张是原图案，后面是同一摆放的多个成品角度。逐张对照，不能只看整体好不好看。
-
-按顺序核对三件事：
-1. 原图里的动物/人物头顶、耳朵、脸部轮廓，在成品中是否被镜头吞掉；原图可见的成行文字、字母，在成品中是否藏进镜头下面。头部轮廓和成行文字都是主要内容，不能当作允许遮挡的背景装饰。手指自然遮挡小局部可接受，镜头吞掉头部或文字不可接受。
-2. 图案底部若是明显被原画布截断的横边，是否在壳底上方悬空。此类横边应下移接壳底。完整的独立标志或贴纸不强制贴底。
-3. 比例、方向、透明区域、壳色、镜头和手部是否保留；不能镜像、拉伸或把透明区域印成白色。
-4. 图案若有明显直线截断边，须贴住对应壳边，不能在壳面内部悬空。已有贴边锚点在缩放后仍须保持；自然弧形轮廓不强制贴边。
-
-只要任一角度存在以上主要问题，good=false，problem必须写出具体缺失，例如“猫头被镜头挡住”“上方文字被挡”“底部截边悬空”。不要用“原构图居中”或“自然遮挡”放行。
-有透明留白且镜头遮挡时，先用 down 下移；余量不足再用 avoid_cam 等比缩小并下移。明显裁切用 smaller。保留已完整可见的主体。连续满版背景遵守附加实际参数，不为正常背景留白缩小。
-
-只输出完整的一行 JSON：
-{"good":true/false,"score":0-100,"problem":"具体问题20字内，没有写无","direction":"none|bigger|smaller|up|down|left|right|avoid_cam","step":0.05~0.3}
-good=true 时 direction=none。发现文字或头部被镜头遮挡时不能返回 good=true。step是相对画布的调整幅度，明显问题用0.2，轻微问题用0.05。`
+const promptTemplate = `检查同一摆放的各角度成品；附原图时对照其实际内容，不给原图评分。
+只可裁掉全透明空白；浅色、半透明的实际内容也必须留在壳边与画面内，不能镜像、拉伸或填白透明区域。原图自带的文字（含小字、气泡文字及已有残字）、主脸及主头部轮廓避开镜头，不能只检查最大标题。先确认浅色头部真实轮廓，别把低对比误判成缺失；成品黑白区域若与原图一致，不得猜测成透明渲染错误。重复纹样的背景元素可被镜头自然遮挡，不把每个小纹样当主角。明显直线截断边须贴对应壳边，独立完整贴纸不强制贴底；本款说明若明确用户接受整幅留白，则按该例外，不强制贴壳边。
+只因镜头区域遮挡主字主脸而避让；模板里的手指、挂绳与反光是原场景，不因这些遮挡反复缩小。保全内容并避开镜头后，保持尽可能饱满的构图，不能将整幅缩成底部小标志来换高分；物理透明壳边框不算印刷背板留白。
+按本轮实际已应用参数、被遮深度和安全余量计算一次联合修正：dx/dy是壳面画布宽/高比例的增量，正右/下；scale_ratio乘本轮实际倍率。主字或主头部被遮时，移到镜头最下沿以下并留余量，别只修正一小段仍受遮挡。比较本轮请求与实际位置，若移动被夹回，必须同时充分缩小释放所需位移，不能反复只移动。可同时横移、纵移、等比缩放，不固定20%，不用预设方向或最小步长；实际内容越界时可缩小，贴边锚点仍须保留。
+camera_clear只判断本轮原图文字、主脸及主头部是否已避开镜头，不包含截边贴合；不能填调整后的预期结果。
+只输出一行完整JSON，七字段齐全，不分析：
+{"good":false,"camera_clear":false,"score":0,"problem":"具体问题20字内，无问题写无","dx":0,"dy":0,"scale_ratio":1}
+score为0至100整数；dx/dy在[-1,1]，scale_ratio在[0.05,2]。good=true必须camera_clear=true、dx=dy=0且scale_ratio=1；false可联合调整三项。若安全约束冲突无法修正，false并返回0/0/1及简短原因，不得当作合格。`
 
 // 合法的 direction 取值集合，模型乱写时用来收敛。
 var validDirs = map[string]bool{
@@ -119,10 +123,14 @@ func Critique(cfg Config, jpeg []byte, placement judge.Placement, otherViews ...
 		}})
 	}
 	messages := []any{
-		map[string]any{"role": "system", "content": "只输出最终评审 JSON 对象，不输出分析、推理或 Markdown。字段必须包含 good(boolean)、score(0至100的整数)、problem(string)、direction(从 none/bigger/smaller/up/down/left/right/avoid_cam 中选一个)、step(number)。必须根据图片评审，不能因输出格式问题推断图片合格。"},
+		map[string]any{"role": "system", "content": "只输出最终JSON，不分析或Markdown。七字段齐全：good(boolean)、camera_clear(boolean)、score(0至100整数)、problem(string)、dx(number)、dy(number)、scale_ratio(number)。camera_clear仅判断本轮文字、主脸主头部是否避镜头，不包含贴边。dx/dy在[-1,1]，scale_ratio在[0.05,2]；good=true必须camera_clear=true及0/0/1。根据本轮成品判断，不填调整预期，格式错误不代表合格。"},
 		map[string]any{"role": "user", "content": content},
 	}
-	body := map[string]any{"stream": true, "stream_options": map[string]bool{"include_usage": true}, "model": cfg.Model, "messages": messages, "max_tokens": cfg.MaxTokens, "temperature": cfg.Temperature}
+	maxTokens := cfg.MaxTokens
+	if !cfg.Thinking && (maxTokens <= 0 || maxTokens > 512) {
+		maxTokens = 512
+	}
+	body := map[string]any{"stream": true, "stream_options": map[string]bool{"include_usage": true}, "model": cfg.Model, "messages": messages, "max_tokens": maxTokens, "temperature": cfg.Temperature}
 	judge.ApplyThinking(body, cfg.Model, cfg.Thinking)
 	judge.ApplyJSONResponse(body, cfg.Model)
 
@@ -195,7 +203,7 @@ func Critique(cfg Config, jpeg []byte, placement judge.Placement, otherViews ...
 		}
 		if attempt == 0 {
 			// Reassess the same images once; never manufacture advice from partial analysis.
-			body["messages"] = append(messages, map[string]any{"role": "user", "content": "上次响应没有完整有效的评审结果。请重新查看所附原图和成品，直接返回最终 JSON，包含全部字段并选择一个合法 direction。不要输出分析、复述要求或从格式错误推断图像质量。"})
+			body["messages"] = append(messages, map[string]any{"role": "user", "content": "重新核对原图与本轮成品，只返回完整最终JSON：good、camera_clear、score、problem、dx、dy、scale_ratio。camera_clear只判断本轮文字、主脸主头部是否已避镜头，不含贴边或调整预期。字段齐全且数值合法；合格必须camera_clear=true及0/0/1。不分析、不借格式错误判断合格。"})
 		}
 	}
 	return fallback(fmt.Errorf("%s；格式重试后仍未确认，请人工复核", issue))
@@ -212,18 +220,38 @@ func parseAdvice(blob string) Advice {
 		blob = strings.TrimSpace(strings.TrimSuffix(content, "```"))
 	}
 	var result struct {
-		Good      *bool   `json:"good"`
-		Score     *int    `json:"score"`
-		Problem   string  `json:"problem"`
-		Direction string  `json:"direction"`
-		Step      float64 `json:"step"`
+		Good        *bool    `json:"good"`
+		CameraClear *bool    `json:"camera_clear"`
+		Score       *int     `json:"score"`
+		Problem     *string  `json:"problem"`
+		DX          *float64 `json:"dx"`
+		DY          *float64 `json:"dy"`
+		ScaleRatio  *float64 `json:"scale_ratio"`
+		Direction   string   `json:"direction"`
+		Step        float64  `json:"step"`
 	}
-	if json.Unmarshal([]byte(blob), &result) != nil ||
-		result.Score == nil || *result.Score < 0 || *result.Score > 100 ||
-		!validDirs[result.Direction] {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(blob), &result) != nil || json.Unmarshal([]byte(blob), &fields) != nil ||
+		result.Score == nil || *result.Score < 0 || *result.Score > 100 {
 		return Advice{}
 	}
-	adv := Advice{Score: *result.Score, Problem: strings.TrimSpace(result.Problem), Direction: result.Direction, Step: 0.1}
+	if fields["dx"] != nil || fields["dy"] != nil || fields["scale_ratio"] != nil {
+		if result.Good == nil || result.CameraClear == nil || result.Problem == nil || result.DX == nil || result.DY == nil || result.ScaleRatio == nil || fields["direction"] != nil || fields["step"] != nil {
+			return Advice{}
+		}
+		adjustment := Adjustment{DX: *result.DX, DY: *result.DY, ScaleRatio: *result.ScaleRatio}
+		if !validAdjustment(adjustment) || (*result.Good && (!*result.CameraClear || adjustment.DX != 0 || adjustment.DY != 0 || adjustment.ScaleRatio != 1)) {
+			return Advice{}
+		}
+		return Advice{Good: *result.Good, CameraClear: *result.CameraClear, Score: *result.Score, Problem: strings.TrimSpace(*result.Problem), Direction: DirTransform, Transform: &adjustment}
+	}
+	if !validDirs[result.Direction] || (result.Good != nil && *result.Good && result.Direction != DirNone) {
+		return Advice{}
+	}
+	adv := Advice{Score: *result.Score, Direction: result.Direction, Step: 0.1}
+	if result.Problem != nil {
+		adv.Problem = strings.TrimSpace(*result.Problem)
+	}
 	if result.Step != 0 {
 		adv.Step = clampStep(result.Step)
 	}
@@ -232,7 +260,29 @@ func parseAdvice(blob string) Advice {
 	} else {
 		adv.Good = adv.Score >= 85 && adv.Direction == DirNone
 	}
+	adv.CameraClear = adv.Good
+	if result.CameraClear != nil {
+		adv.CameraClear = *result.CameraClear
+	} else if fields["camera_clear"] != nil {
+		return Advice{}
+	}
+	if adv.Good && !adv.CameraClear {
+		return Advice{}
+	}
 	return adv
+}
+
+func finite(values ...float64) bool {
+	for _, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return false
+		}
+	}
+	return true
+}
+
+func validAdjustment(a Adjustment) bool {
+	return finite(a.DX, a.DY, a.ScaleRatio) && math.Abs(a.DX) <= 1 && math.Abs(a.DY) <= 1 && a.ScaleRatio >= 0.05 && a.ScaleRatio <= 2
 }
 
 // clampStep 把模型给的幅度限制在 0.05~0.3，避免一步跳太远。
@@ -266,6 +316,20 @@ func fallback(err error) Advice {
 //   - up/down/left/right → scale 不变，只调 offset；
 //   - avoid_cam → 先缩小 step，再按当前重心偏移的反方向微移。
 func Plan(adv Advice, scale, offsetX, offsetY float64) (nextScale float64, nextOffX, nextOffY float64, iterate bool) {
+	if adv.Good || adv.Fallback || !finite(scale, offsetX, offsetY) || scale <= 0 {
+		return scale, offsetX, offsetY, false
+	}
+	if adv.Transform != nil {
+		if !validAdjustment(*adv.Transform) {
+			return scale, offsetX, offsetY, false
+		}
+		nextScale = scale * adv.Transform.ScaleRatio
+		nextOffX, nextOffY = offsetX+adv.Transform.DX, offsetY+adv.Transform.DY
+		if !finite(nextScale, nextOffX, nextOffY) || nextScale <= 0 {
+			return scale, offsetX, offsetY, false
+		}
+		return nextScale, nextOffX, nextOffY, nextScale != scale || nextOffX != offsetX || nextOffY != offsetY
+	}
 	if adv.Good || adv.Direction == DirNone || adv.Direction == "" {
 		return scale, offsetX, offsetY, false
 	}
@@ -335,6 +399,7 @@ func clampOffset(v float64) float64 {
 
 // Round 描述一轮迭代的结果，供引擎记录日志与界面展示。
 type Round struct {
+	Applied []psx.AppliedPlacement `json:"applied,omitempty"`
 	// Index 是 1-based 轮次。
 	Index int
 	// Scale / OffsetX / OffsetY 是本轮实际使用的参数。
@@ -346,5 +411,6 @@ type Round struct {
 	// Problem 是本轮评审指出的问题。
 	Problem string
 	// Good 表示本轮已达标。
-	Good bool
+	Good        bool
+	CameraClear bool `json:"camera_clear"`
 }

@@ -50,6 +50,46 @@ func TestNormalizeTrimsAlpha(t *testing.T) {
 	}
 }
 
+func TestNormalizeTrimPreservesDistantAlphaOnePixel(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "source.png"), filepath.Join(dir, "normalized.png")
+	im := image.NewNRGBA(image.Rect(0, 0, 100, 100))
+	for y := 30; y < 70; y++ {
+		for x := 40; x < 60; x++ {
+			im.SetNRGBA(x, y, color.NRGBA{R: 200, G: 100, B: 50, A: 255})
+		}
+	}
+	im.SetNRGBA(4, 5, color.NRGBA{R: 255, A: 1})
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, im); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Normalize(src, dst, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Width != 56 || r.Height != 65 || !r.Trimmed || r.OrigBBox == nil || *r.OrigBBox != (Rect{X0: 4, Y0: 5, X1: 60, Y1: 70}) {
+		t.Fatalf("trim must remove only fully transparent margins: %+v", r)
+	}
+	out, err := Decode(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for y := 5; y < 70; y++ {
+		for x := 4; x < 60; x++ {
+			if got := color.NRGBAModel.Convert(out.At(x-4, y-5)); got != im.At(x, y) {
+				t.Fatalf("pixel changed at source (%d,%d): got %v want %v", x, y, got, im.At(x, y))
+			}
+		}
+	}
+}
+
 // TestNormalizeKeepSize 守住 --no-trim 时保留原尺寸。
 func TestNormalizeKeepSize(t *testing.T) {
 	dir := t.TempDir()

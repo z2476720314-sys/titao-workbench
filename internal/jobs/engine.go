@@ -65,23 +65,28 @@ type Options struct {
 
 // Task 是一个「图案 × 模板」组合。
 type Task struct {
-	CompletionKey string   `json:"-"`
-	FillTop       bool     `json:"fillTop,omitempty"`
-	ID            int      `json:"id"`
-	Pattern       string   `json:"pattern"`
-	PatternName   string   `json:"patternName"`
-	Template      string   `json:"template"`
-	TemplateName  string   `json:"templateName"`
-	Phase         Phase    `json:"phase"`
-	Progress      int      `json:"progress"` // 0-100
-	Message       string   `json:"message"`
-	OutputDir     string   `json:"outputDir"`
-	Files         []string `json:"files"`
-	Error         string   `json:"error"`
-	ChosenScale   float64  `json:"chosenScale"`
-	JudgeNote     string   `json:"judgeNote"`
-	TuneRounds    int      `json:"tuneRounds"` // 实际迭代轮数
-	ElapsedMS     int64    `json:"elapsedMs"`
+	CompletionKey   string        `json:"-"`
+	FillTop         bool          `json:"fillTop,omitempty"`
+	ID              int           `json:"id"`
+	Pattern         string        `json:"pattern"`
+	OriginalPattern string        `json:"originalPattern,omitempty"`
+	OriginalSHA256  string        `json:"originalSha256,omitempty"`
+	PreparedSHA256  string        `json:"preparedSha256,omitempty"`
+	KeepWhole       bool          `json:"keepWhole,omitempty"`
+	PatternName     string        `json:"patternName"`
+	Template        string        `json:"template"`
+	TemplateName    string        `json:"templateName"`
+	Phase           Phase         `json:"phase"`
+	Progress        int           `json:"progress"` // 0-100
+	Message         string        `json:"message"`
+	OutputDir       string        `json:"outputDir"`
+	Files           []string      `json:"files"`
+	Error           string        `json:"error"`
+	ChosenScale     float64       `json:"chosenScale"`
+	JudgeNote       string        `json:"judgeNote"`
+	TuneRounds      int           `json:"tuneRounds"` // 实际迭代轮数
+	TuneHistory     []tuner.Round `json:"tuneHistory,omitempty"`
+	ElapsedMS       int64         `json:"elapsedMs"`
 }
 
 // Event 是推给前端的事件。
@@ -729,6 +734,14 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 				i+1, len(tasks), t.PatternName, t.TemplateName)
 			continue
 		}
+		if err := e.validatePreparedTask(t); err != nil {
+			e.failTask(t, fmt.Errorf("重排副本校验失败: %w", err))
+			e.saveQueue(opt)
+			continue
+		}
+		if t.OriginalPattern != "" {
+			e.logf("dim", "  使用已验收图案副本：%s", t.PatternName)
+		}
 
 		// 组开始前落盘：这时若被强杀，这一组会重跑（比漏跑安全）
 		// 暂停或重启期间可改待执行图案；只比较实际开工到导出之间的变化。
@@ -981,6 +994,9 @@ func tagSummaryOf(tags []string) string {
 func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	jc judge.Config, t *Task, outRoot string, seq, total int) {
 
+	if t.KeepWhole {
+		opt.NoCrop = true
+	}
 	t0 := time.Now()
 	// 每组的临时目录：图案规范化产物与各档拼合图都放这里，结束即删
 	tmp, err := os.MkdirTemp("", "titao_")
@@ -999,12 +1015,17 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 
 	// 1) 图案规范化：去 dpi + 可选裁透明留白
 	patPath := filepath.Join(tmp, "pat.png")
-	fullBleed := opt.Auto && fitIsContainLike(opt.Fit)
+	autoLayout := opt.Auto && fitIsContainLike(opt.Fit)
+	fullBleed := autoLayout && !opt.NoCrop
 	// 自动铺放保留原画布中的透明留白，避免把原构图重新裁成独立贴纸。
-	pr, err := imgutil.Normalize(t.Pattern, patPath, opt.TrimAlpha && !fullBleed)
+	pr, err := imgutil.Normalize(t.Pattern, patPath, opt.TrimAlpha && !autoLayout)
 	if err != nil {
 		e.failTask(t, fmt.Errorf("规范化图案: %w", err))
 		return
+	}
+	if t.KeepWhole {
+		pr.AnchorX, pr.AnchorY = 0, 0
+		e.logf("info", "  本款保留整幅画面，允许边缘留白，不强制贴壳边")
 	}
 	if pr.Trimmed {
 		e.logf("dim", "  图案 %dx%d（裁掉透明留白 %s）", pr.Width, pr.Height, pr.OrigBBox)
@@ -1014,10 +1035,16 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 
 	referencePath := patPath
 	renderFit := opt.Fit
+	if opt.NoCrop {
+		renderFit = psx.FitContain
+	}
 	transparentPadding := fullBleed && pr.ContentBounds != [4]float64{} && pr.ContentBounds != [4]float64{0, 0, 1, 1}
 	if fullBleed {
 		renderFit = psx.FitCover
 		e.logf("dim", "  按原画布等比满铺，保留透明度与原构图，仅检查主要内容问题")
+	}
+	if opt.NoCrop {
+		e.logf("dim", "  按最终可见区域完整放入，保护所有有效内容，允许联合缩放与位移")
 	}
 	// 2) 多轮参数微调
 	//    完整放下时先按原比例居中渲染，只在评审发现主要内容问题时重渲，
@@ -1025,16 +1052,16 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	//    关闭自动判断或 auto_tune_on 时退化为原来的单轮行为。
 	tc := tuner.Config(jc)
 	reviewOn, rounds := effectiveReviewSettings(opt, def)
-	alignBottom := pr.BottomContent && fitIsContainLike(renderFit)
-	placement := judge.Placement{Fit: renderFit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, AlignBottom: alignBottom, FullBleed: fullBleed && !transparentPadding, TransparentPadding: transparentPadding}
-	if transparentPadding {
+	alignBottom := !opt.NoCrop && pr.BottomContent && fitIsContainLike(renderFit)
+	placement := judge.Placement{Fit: renderFit, NoCrop: opt.NoCrop, KeepWhole: t.KeepWhole, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, AlignBottom: alignBottom, FullBleed: fullBleed && !transparentPadding, TransparentPadding: transparentPadding}
+	if transparentPadding || opt.NoCrop {
 		placement.AnchorX, placement.AnchorY = pr.AnchorX, pr.AnchorY
 	}
 	if alignBottom {
 		e.logf("dim", "  原图底部有内容：按原比例贴合壳底")
 	}
 	if opt.Auto {
-		placement.SourceDataURL, err = imgutil.ThumbDataURL(referencePath, def.ImageMaxSide)
+		placement.SourceDataURL, placement.SourceAlphaGuide, err = imgutil.ReviewReferenceDataURL(referencePath, def.ImageMaxSide)
 		if err != nil {
 			e.failTask(t, fmt.Errorf("生成原图对照: %w", err))
 			return
@@ -1056,20 +1083,23 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		e.logf("dim", "  禁止裁切：实际候选档位 %v", scales)
 	}
 	offX, offY := opt.OffsetX, opt.OffsetY
-	if fullBleed {
+	if autoLayout {
 		scales = []float64{1}
 		offX, offY = 0, 0
 		placement.OffsetX, placement.OffsetY = 0, 0
 	}
 	var (
-		flatPick    string  // 最终选中的拼合图
-		chosenScale float64 // 最终填充倍数
-		chosenNote  string  // 最终选档理由
-		reviewGood  bool
-		bestScale   float64
-		bestScore   = -1
-		bestNote    string
-		hist        []tuner.Round // 各轮评审记录，供界面展示
+		lastMeta        *psx.RenderMetadata
+		flatPick        string  // 最终选中的拼合图
+		chosenScale     float64 // 最终填充倍数
+		chosenNote      string  // 最终选档理由
+		reviewGood      bool
+		bestScale       float64
+		bestScore       = -1
+		bestCameraClear bool
+		bestNote        string
+		constraintNote  string
+		hist            []tuner.Round // 各轮评审记录，供界面展示
 	)
 
 	for round := 1; ; round++ {
@@ -1091,22 +1121,30 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		}
 
 		req := psx.RenderRequest{
-			TemplateCopy: tplCopy,
-			Pattern:      patPath,
-			Group:        opt.Group,
-			Fit:          renderFit,
-			Scales:       scales,
-			OffsetX:      offX,
-			OffsetY:      offY,
-			OutDir:       tmp,
-			PSVersion:    def.PSVersion,
-			NoCrop:       opt.NoCrop,
-			AlignBottom:  alignBottom,
+			TemplateCopy:    tplCopy,
+			Pattern:         patPath,
+			Group:           opt.Group,
+			Fit:             renderFit,
+			Scales:          scales,
+			OffsetX:         offX,
+			OffsetY:         offY,
+			OutDir:          tmp,
+			PSVersion:       def.PSVersion,
+			NoCrop:          opt.NoCrop,
+			AlignBottom:     alignBottom,
+			CellSize:        opt.CellSize,
+			DiagnosticAlpha: opt.NoCrop && reviewOn && placement.SourceAlphaGuide,
+			PreferOffsets:   opt.NoCrop && reviewOn && round > 1,
 		}
-		if transparentPadding {
+		if transparentPadding || opt.NoCrop {
 			req.ContentBounds = pr.ContentBounds
 			req.AnchorX, req.AnchorY = pr.AnchorX, pr.AnchorY
 		}
+		// Legacy metadata returns canvas-center offsets; do not add its bottom baseline twice.
+		if round > 1 && !opt.NoCrop && lastMeta != nil {
+			req.AlignBottom = false
+		}
+		placement.AlignBottom = req.AlignBottom
 		renderStart := time.Now()
 		log, err := e.ps.Render(req)
 		e.logf("dim", "  第 %d 轮渲染耗时 %.1fs", round, time.Since(renderStart).Seconds())
@@ -1147,7 +1185,15 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		// pick 是 flats 的下标（不是 scales 的下标）。
 		// 某档拼合图缺失时 flats 比 scales 短，两者下标不能混用。
 		pick := 0
-		if opt.Auto && len(flats) > 1 {
+		if opt.NoCrop && opt.Auto && len(flats) > 1 {
+			firstMeta, _, err := renderedPlacement(req, flatIdx[0])
+			if err != nil {
+				e.failTask(t, err)
+				return
+			}
+			constraintNote = anchorConflict(firstMeta)
+		}
+		if opt.Auto && len(flats) > 1 && constraintNote == "" {
 			cands := make([]judge.Candidate, 0, len(flats))
 			var idxFlat []int // cands[i] 对应 flats 的哪个下标
 			for i, f := range flats {
@@ -1180,8 +1226,34 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 
 		flatPick = flats[pick]
 		chosenScale = scales[flatIdx[pick]]
+		meta, actual, err := renderedPlacement(req, flatIdx[pick])
+		if err != nil {
+			e.failTask(t, err)
+			return
+		}
+		chosenScale, offX, offY = actual.Scale, actual.OffsetX, actual.OffsetY
+		placement.AppliedSummary = placementSummary(meta, req, flatIdx[pick])
+		if sameRenderedPlacement(lastMeta, meta) {
+			chosenNote = "调整被可见边界或贴边约束限制，实际图案未变化，请人工复核"
+			e.logf("warn", "  实际摆放未改变，停止重复模型评审")
+			break
+		}
+		lastMeta = meta
 
 		cur := tuner.Round{Index: round, Scale: chosenScale, OffsetX: offX, OffsetY: offY}
+		if meta != nil {
+			cur.Applied = meta.Placements
+		}
+		if opt.NoCrop {
+			constraintNote = anchorConflict(meta)
+			if constraintNote != "" {
+				chosenNote = constraintNote + "；请人工复核"
+				cur.Problem = constraintNote
+				hist = append(hist, cur)
+				e.logf("warn", "  %s", chosenNote)
+				break
+			}
+		}
 
 		if !reviewOn {
 			hist = append(hist, cur)
@@ -1195,11 +1267,29 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			t.Message = fmt.Sprintf("第 %d 轮评审微调", round)
 		})
 
-		views, err := imgutil.ReviewCellsJPEG(flatPick, opt.CellSize, def.ImageMaxSide, 90)
+		extraCells := []int{2}
+		if meta != nil {
+			for _, p := range meta.Placements {
+				extraCells = append(extraCells, p.Cell)
+			}
+		}
+		views, err := imgutil.ReviewCellsJPEG(flatPick, opt.CellSize, def.ImageMaxSide, 90, extraCells...)
 		if err != nil {
 			e.logf("warn", "  评审图生成失败，结束微调: %v", err)
 			hist = append(hist, cur)
 			break
+		}
+		placement.DiagnosticFirstView = false
+		if req.DiagnosticAlpha {
+			diagnostic, err := imgutil.FirstCellJPEG(req.DiagnosticFlatPath(flatIdx[pick]), opt.CellSize, def.ImageMaxSide, 90)
+			if err != nil {
+				chosenNote = "轮廓诊断未完成，请人工复核"
+				e.logf("warn", "  轮廓诊断预览失败：%v", err)
+				hist = append(hist, cur)
+				break
+			}
+			views[0] = diagnostic
+			placement.DiagnosticFirstView = true
 		}
 		placement.Scale, placement.OffsetX, placement.OffsetY = chosenScale, offX, offY
 		reviewStart := time.Now()
@@ -1212,11 +1302,17 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 				e.logf("dim", "  末次模型响应输出 tokens %d", *adv.Usage.CompletionTokens)
 			}
 		}
+		if !anchorsMet(meta) {
+			adv.Good = false
+			adv.Problem += "；截断边未贴边"
+		}
 		reviewGood = adv.Good && !adv.Fallback
 		cur.Score = adv.Score
 		cur.Problem = adv.Problem
 		cur.Good = adv.Good
+		cur.CameraClear = adv.CameraClear
 		hist = append(hist, cur)
+		e.updateTask(t, func(t *Task) { t.TuneHistory = append([]tuner.Round(nil), hist...) })
 
 		if adv.Fallback {
 			chosenNote = "评审未完成，请人工复核"
@@ -1224,12 +1320,13 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			break
 		}
 		chosenNote = fmt.Sprintf("评审 %d 分：%s", adv.Score, adv.Problem)
-		if adv.Score > bestScore {
+		if (adv.CameraClear && !bestCameraClear) || (adv.CameraClear == bestCameraClear && adv.Score > bestScore) {
 			if err := copyFile(flatPick, filepath.Join(tmp, "best.png")); err != nil {
 				e.failTask(t, fmt.Errorf("保存评审候选: %w", err))
 				return
 			}
 			bestScale, bestScore, bestNote = chosenScale, adv.Score, chosenNote
+			bestCameraClear = adv.CameraClear
 		}
 		if round >= rounds {
 			e.logf("info", "  最终评审 %d 分：%s（合格=%t）", adv.Score, adv.Problem, reviewGood)
@@ -1243,13 +1340,8 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		e.logf("info", "  第 %d 轮评审 %d 分：%s → %s x%.2f 偏移(%+.2f,%+.2f)",
 			round, adv.Score, adv.Problem, adv.Direction, nextScale, nx, ny)
 
-		// 禁止裁切时，微调不能把图案放大到超出壳面。
-		// 只压回上限、不放弃这一轮：模型可能同时给了位移建议，位移仍要生效。
-		if fullBleed && !transparentPadding && nextScale < 1 {
-			nextScale = 1
-		}
-		if !fullBleed && opt.NoCrop && fitIsContainLike(opt.Fit) && nextScale > 1 {
-			e.logf("info", "  禁止裁切：x%.2f 超出完整放下上限，压回 x1.00", nextScale)
+		// 旧满铺模式保留不透明底的倍率下限；严格模式由实际可见边界收敛。
+		if !opt.NoCrop && fullBleed && !transparentPadding && nextScale < 1 {
 			nextScale = 1
 		}
 		if nextScale == chosenScale && nx == offX && ny == offY {
@@ -1291,7 +1383,9 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		t.Phase = PhaseDone
 		t.Progress = 100
 		t.Message = fmt.Sprintf("生成 %d 张", len(files))
-		if reviewOn && !reviewGood {
+		if constraintNote != "" {
+			t.Message += "（约束冲突，请人工复核）"
+		} else if reviewOn && !reviewGood {
 			t.Message += "（评审未通过，请人工复核）"
 		}
 		t.Files = files
@@ -1301,6 +1395,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		}
 		t.ChosenScale = chosenScale
 		t.TuneRounds = len(hist)
+		t.TuneHistory = hist
 		t.ElapsedMS = elapsed.Milliseconds()
 	})
 	e.logf("ok", "  ✓ %d 张 → %s（%.1fs）", len(files), outDir, elapsed.Seconds())

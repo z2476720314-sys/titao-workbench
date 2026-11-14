@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"titao/internal/tuner"
 )
 
 // QueueVersion 是 queue.json 的格式版本。读到不认识的版本按「损坏」处理，
@@ -26,20 +28,25 @@ const QueueVersion = 1
 // 与内存里的 Task（驼峰）刻意不同：前者是落盘格式，后者是 Wails 传输格式，
 // 两者的演进节奏不该互相绑架。
 type QueueTask struct {
-	CompletionKey string   `json:"completion_key,omitempty"`
-	ID            int      `json:"id"`
-	Pattern       string   `json:"pattern"`
-	Template      string   `json:"template"`
-	PatternName   string   `json:"pattern_name"`
-	TemplateName  string   `json:"template_name"`
-	Phase         Phase    `json:"phase"`
-	Files         []string `json:"files,omitempty"`
-	Error         string   `json:"error,omitempty"`
-	ChosenScale   float64  `json:"chosen_scale,omitempty"`
-	ElapsedMS     int64    `json:"elapsed_ms,omitempty"`
-	Message       string   `json:"message,omitempty"`
-	JudgeNote     string   `json:"judge_note,omitempty"`
-	TuneRounds    int      `json:"tune_rounds,omitempty"`
+	CompletionKey   string        `json:"completion_key,omitempty"`
+	ID              int           `json:"id"`
+	Pattern         string        `json:"pattern"`
+	OriginalPattern string        `json:"original_pattern,omitempty"`
+	OriginalSHA256  string        `json:"original_sha256,omitempty"`
+	PreparedSHA256  string        `json:"prepared_sha256,omitempty"`
+	KeepWhole       bool          `json:"keep_whole,omitempty"`
+	Template        string        `json:"template"`
+	PatternName     string        `json:"pattern_name"`
+	TemplateName    string        `json:"template_name"`
+	Phase           Phase         `json:"phase"`
+	Files           []string      `json:"files,omitempty"`
+	Error           string        `json:"error,omitempty"`
+	ChosenScale     float64       `json:"chosen_scale,omitempty"`
+	ElapsedMS       int64         `json:"elapsed_ms,omitempty"`
+	Message         string        `json:"message,omitempty"`
+	JudgeNote       string        `json:"judge_note,omitempty"`
+	TuneRounds      int           `json:"tune_rounds,omitempty"`
+	TuneHistory     []tuner.Round `json:"tune_history,omitempty"`
 }
 
 // Queue 是一次运行的完整落盘镜像。
@@ -99,20 +106,25 @@ func NewQueue(opt Options, tasks []*Task) *Queue {
 	}
 	for i, t := range tasks {
 		q.Tasks[i] = QueueTask{
-			CompletionKey: t.CompletionKey,
-			ID:            t.ID,
-			Pattern:       t.Pattern,
-			Template:      t.Template,
-			PatternName:   t.PatternName,
-			TemplateName:  t.TemplateName,
-			Phase:         t.Phase,
-			Files:         append([]string(nil), t.Files...),
-			Error:         t.Error,
-			ChosenScale:   t.ChosenScale,
-			ElapsedMS:     t.ElapsedMS,
-			Message:       t.Message,
-			JudgeNote:     t.JudgeNote,
-			TuneRounds:    t.TuneRounds,
+			CompletionKey:   t.CompletionKey,
+			ID:              t.ID,
+			Pattern:         t.Pattern,
+			OriginalPattern: t.OriginalPattern,
+			OriginalSHA256:  t.OriginalSHA256,
+			PreparedSHA256:  t.PreparedSHA256,
+			KeepWhole:       t.KeepWhole,
+			Template:        t.Template,
+			PatternName:     t.PatternName,
+			TemplateName:    t.TemplateName,
+			Phase:           t.Phase,
+			Files:           append([]string(nil), t.Files...),
+			Error:           t.Error,
+			ChosenScale:     t.ChosenScale,
+			ElapsedMS:       t.ElapsedMS,
+			Message:         t.Message,
+			JudgeNote:       t.JudgeNote,
+			TuneRounds:      t.TuneRounds,
+			TuneHistory:     append([]tuner.Round(nil), t.TuneHistory...),
 		}
 	}
 	q.Pending = q.CountPending()
@@ -127,20 +139,25 @@ func (q *Queue) ToTasks() []*Task {
 	out := make([]*Task, len(q.Tasks))
 	for i, qt := range q.Tasks {
 		out[i] = &Task{
-			CompletionKey: qt.CompletionKey,
-			ID:            qt.ID,
-			Pattern:       qt.Pattern,
-			PatternName:   qt.PatternName,
-			Template:      qt.Template,
-			TemplateName:  qt.TemplateName,
-			Phase:         qt.Phase,
-			Files:         append([]string(nil), qt.Files...),
-			Error:         qt.Error,
-			ChosenScale:   qt.ChosenScale,
-			ElapsedMS:     qt.ElapsedMS,
-			Message:       qt.Message,
-			JudgeNote:     qt.JudgeNote,
-			TuneRounds:    qt.TuneRounds,
+			CompletionKey:   qt.CompletionKey,
+			ID:              qt.ID,
+			Pattern:         qt.Pattern,
+			OriginalPattern: qt.OriginalPattern,
+			OriginalSHA256:  qt.OriginalSHA256,
+			PreparedSHA256:  qt.PreparedSHA256,
+			KeepWhole:       qt.KeepWhole,
+			PatternName:     qt.PatternName,
+			Template:        qt.Template,
+			TemplateName:    qt.TemplateName,
+			Phase:           qt.Phase,
+			Files:           append([]string(nil), qt.Files...),
+			Error:           qt.Error,
+			ChosenScale:     qt.ChosenScale,
+			ElapsedMS:       qt.ElapsedMS,
+			Message:         qt.Message,
+			JudgeNote:       qt.JudgeNote,
+			TuneRounds:      qt.TuneRounds,
+			TuneHistory:     append([]tuner.Round(nil), qt.TuneHistory...),
 		}
 		// 已完成的组进度条要显示满格，否则界面看着像卡在 0%
 		if qt.Phase == PhaseDone || qt.Phase == PhaseSkipped {

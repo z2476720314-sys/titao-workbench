@@ -50,6 +50,14 @@ completed.json
 precheck.jsonl
 precheck.sample*.jsonl
 
+# 已验收重排副本运行数据（根目录或本地 profile，保留 CLI 源码）
+/prepared-artwork.json
+/prepared-artwork.lock
+/prepared-artwork-assets/
+/profile/prepared-artwork.json
+/profile/prepared-artwork.lock
+/profile/prepared-artwork-assets/
+
 # 测试与覆盖率
 coverage.out
 coverage.html

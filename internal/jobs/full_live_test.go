@@ -69,6 +69,11 @@ func TestLiveFullMockups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	publicSettings := settings
+	publicSettings.APIKey, publicSettings.TuneAPIKey, publicSettings.GenAPIKey = "", "", ""
+	if _, err := store.Update(func(c *cfg.Config) { *c = publicSettings }); err != nil {
+		t.Fatal(err)
+	}
 	ps := photocraft.New(settings.PhotoCraftCLI)
 	defer ps.Close()
 	version, err := ps.Probe()
@@ -101,6 +106,9 @@ func TestLiveFullMockups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := e.prepareTaskInputs(tasks); err != nil {
+		t.Fatal(err)
+	}
 	if err := e.begin(opt, settings, tasks, 0, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +122,11 @@ func TestLiveFullMockups(t *testing.T) {
 	tasks = e.Tasks()
 	files := 0
 	for _, task := range tasks {
-		if rejected[task.Pattern] {
+		original := task.Pattern
+		if task.OriginalPattern != "" {
+			original = task.OriginalPattern
+		}
+		if rejected[original] {
 			if task.Phase != PhaseSkipped || len(task.Files) != 0 {
 				t.Errorf("rejected pattern was not skipped: %d %s", task.ID, task.Phase)
 			}

@@ -78,7 +78,7 @@ func (a *App) startup(ctx context.Context) {
 	if c.Renderer == "photocraft" {
 		a.editorName = "PhotoCraft"
 	}
-	a.ps = &lazyEditor{open: func() (editorSession, string, error) { return newRenderer(c) }}
+	a.ps = &lazyEditor{renderer: c.Renderer, open: func() (editorSession, string, error) { return newRenderer(c) }}
 	a.eng = jobs.New(a.ps, store, func(ev jobs.Event) {
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "titao:event", ev)

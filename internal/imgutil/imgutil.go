@@ -16,6 +16,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sort"
 
 	_ "golang.org/x/image/tiff" // 注册 TIFF 解码器
 )
@@ -96,9 +97,11 @@ func Normalize(src, dst string, trim bool) (PatternResult, error) {
 		}
 	}
 	res.BottomContent = bottomPixels >= max(1, (rgba.Bounds().Dx()*band+99)/100)
+	// Detect source-canvas cuts before trimming creates new edges around complete elements.
+	res.AnchorX, res.AnchorY = cutEdgeAnchors(rgba)
 
 	if trim {
-		if box, ok := alphaBounds(rgba); ok && box != b {
+		if box, ok := alphaBoundsAtLeast(rgba, 1); ok && box != b {
 			rgba = cropNRGBA(rgba, box)
 			res.Trimmed = true
 			res.OrigBBox = &Rect{X0: box.Min.X, Y0: box.Min.Y, X1: box.Max.X, Y1: box.Max.Y}
@@ -109,7 +112,6 @@ func Normalize(src, dst string, trim bool) (PatternResult, error) {
 	if box, ok := alphaBounds(rgba); ok {
 		res.ContentBounds = [4]float64{float64(box.Min.X) / float64(res.Width), float64(box.Min.Y) / float64(res.Height), float64(box.Max.X) / float64(res.Width), float64(box.Max.Y) / float64(res.Height)}
 	}
-	res.AnchorX, res.AnchorY = cutEdgeAnchors(rgba)
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return res, err
@@ -208,10 +210,28 @@ func cutEdgeAnchors(img *image.NRGBA) (int, int) {
 		}
 		return score
 	}
-	left := edgeScore(b.Min, image.Pt(0, 1), image.Pt(1, 0), b.Dy(), b.Dx())
-	right := edgeScore(image.Pt(b.Max.X-1, b.Min.Y), image.Pt(0, 1), image.Pt(-1, 0), b.Dy(), b.Dx())
-	top := edgeScore(b.Min, image.Pt(1, 0), image.Pt(0, 1), b.Dx(), b.Dy())
-	bottom := edgeScore(image.Pt(b.Min.X, b.Max.Y-1), image.Pt(1, 0), image.Pt(0, -1), b.Dx(), b.Dy())
+	band := min(8, max(1, min(b.Dx(), b.Dy())/100))
+	bandScore := func(start, along, inward image.Point, length, depth int) float64 {
+		score := 0.0
+		for i := 0; i < band; i++ {
+			score = max(score, edgeScore(start.Add(inward.Mul(i)), along, inward, length, depth-i))
+		}
+		return score
+	}
+	canvas := img.Bounds()
+	var left, right, top, bottom float64
+	if b.Min.X-canvas.Min.X <= band {
+		left = bandScore(b.Min, image.Pt(0, 1), image.Pt(1, 0), b.Dy(), b.Dx())
+	}
+	if canvas.Max.X-b.Max.X <= band {
+		right = bandScore(image.Pt(b.Max.X-1, b.Min.Y), image.Pt(0, 1), image.Pt(-1, 0), b.Dy(), b.Dx())
+	}
+	if b.Min.Y-canvas.Min.Y <= band {
+		top = bandScore(b.Min, image.Pt(1, 0), image.Pt(0, 1), b.Dx(), b.Dy())
+	}
+	if canvas.Max.Y-b.Max.Y <= band {
+		bottom = bandScore(image.Pt(b.Min.X, b.Max.Y-1), image.Pt(1, 0), image.Pt(0, -1), b.Dx(), b.Dy())
+	}
 	x, y := 0, 0
 	// The camera end remains free when both vertical cuts are equally strong.
 	if max(left, right) >= .2 {
@@ -362,7 +382,7 @@ func FirstCellJPEG(src string, cellSize, maxSide int, quality int) ([]byte, erro
 }
 
 // ReviewCellsJPEG keeps each sampled angle at its own readable resolution.
-func ReviewCellsJPEG(src string, cellSize, maxSide, quality int) ([][]byte, error) {
+func ReviewCellsJPEG(src string, cellSize, maxSide, quality int, extraCells ...int) ([][]byte, error) {
 	if cellSize <= 0 || maxSide <= 0 {
 		return nil, fmt.Errorf("无效评审预览尺寸")
 	}
@@ -376,8 +396,15 @@ func ReviewCellsJPEG(src string, cellSize, maxSide, quality int) ([][]byte, erro
 		return nil, fmt.Errorf("拼合图 %dx%d 小于一格 %d", b.Dx(), b.Dy(), cellSize)
 	}
 	var views [][]byte
+	indices := []int{0, n / 2, n - 1}
+	for _, i := range extraCells {
+		if i >= 0 && i < n {
+			indices = append(indices, i)
+		}
+	}
+	sort.Ints(indices)
 	previous := -1
-	for _, i := range []int{0, n / 2, n - 1} {
+	for _, i := range indices {
 		if i == previous {
 			continue
 		}

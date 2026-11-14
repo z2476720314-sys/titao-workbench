@@ -74,7 +74,7 @@ func TestAutoStartsFullOnOriginalCanvasRegardlessOfTransparency(t *testing.T) {
 			defer srv.Close()
 			settings := cfg.Default()
 			task := &Task{ID: 1, Pattern: path, PatternName: "background", Template: tpl, TemplateName: "template", FillTop: true}
-			opt := Options{Auto: true, NoCrop: true, Fit: "auto", TrimAlpha: true, Scales: settings.Candidates, CellSize: 80, JPGQuality: 90}
+			opt := Options{Auto: true, NoCrop: false, Fit: "auto", TrimAlpha: true, Scales: settings.Candidates, CellSize: 80, JPGQuality: 90}
 			e.processOne(context.Background(), opt, settings, judge.Config{BaseURL: srv.URL, APIKey: "dummy", Model: "test", MaxTokens: 100, Timeout: time.Second}, task, filepath.Join(dir, "out"), 1, 1)
 			if task.Phase != PhaseDone || editor.size != image.Pt(40, height) || len(editor.requests) != tc.calls || editor.requests[0].Fit != "cover" || len(editor.requests[0].Scales) != 1 || calls != tc.calls {
 				t.Fatalf("background flow: phase=%s size=%v renders=%d calls=%d", task.Phase, editor.size, len(editor.requests), calls)

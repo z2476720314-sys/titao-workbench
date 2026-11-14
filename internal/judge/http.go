@@ -23,7 +23,7 @@ func DoVisionRequest(req *http.Request, timeout time.Duration) (*http.Response, 
 		defer cancel()
 	}
 	req = req.Clone(ctx)
-	client := &http.Client{}
+	client := &http.Client{Transport: visionTransport()}
 	for attempt := 0; ; attempt++ {
 		resp, err := client.Do(req)
 		if err == nil {
