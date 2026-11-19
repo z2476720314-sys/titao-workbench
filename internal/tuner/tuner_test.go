@@ -171,21 +171,21 @@ func TestCritiqueSendsEnableThinkingFalse(t *testing.T) {
 // ── Plan 的参数推导 ──────────────────────────────────────────
 
 func TestPlanGoodStops(t *testing.T) {
-	_, _, _, iterate := Plan(Advice{Good: true, Direction: DirNone}, 1.0, 0, 0)
+	_, _, _, _, iterate := Plan(Advice{Good: true, Direction: DirNone}, 1.0, 0, 0, 1)
 	if iterate {
 		t.Error("已达标不该再迭代")
 	}
 }
 
 func TestPlanNoneStops(t *testing.T) {
-	_, _, _, iterate := Plan(Advice{Direction: DirNone}, 1.0, 0, 0)
+	_, _, _, _, iterate := Plan(Advice{Direction: DirNone}, 1.0, 0, 0, 1)
 	if iterate {
 		t.Error("direction=none 不该再迭代")
 	}
 }
 
 func TestPlanBigger(t *testing.T) {
-	sc, ox, oy, iterate := Plan(Advice{Direction: DirBigger, Step: 0.2}, 1.0, 0, 0)
+	sc, ox, oy, _, iterate := Plan(Advice{Direction: DirBigger, Step: 0.2}, 1.0, 0, 0, 1)
 	if !iterate {
 		t.Fatal("应该继续迭代")
 	}
@@ -198,7 +198,7 @@ func TestPlanBigger(t *testing.T) {
 }
 
 func TestPlanSmaller(t *testing.T) {
-	sc, _, _, iterate := Plan(Advice{Direction: DirSmaller, Step: 0.1}, 1.0, 0, 0)
+	sc, _, _, _, iterate := Plan(Advice{Direction: DirSmaller, Step: 0.1}, 1.0, 0, 0, 1)
 	if !iterate {
 		t.Fatal("应该继续迭代")
 	}
@@ -220,7 +220,7 @@ func TestPlanOffsets(t *testing.T) {
 		{DirRight, 0.1, 0, "右移"},
 	}
 	for _, c := range cases {
-		_, ox, oy, iterate := Plan(Advice{Direction: c.dir, Step: 0.1}, 1.0, 0, 0)
+		_, ox, oy, _, iterate := Plan(Advice{Direction: c.dir, Step: 0.1}, 1.0, 0, 0, 1)
 		if !iterate {
 			t.Errorf("%s 应该继续迭代", c.reason)
 			continue
@@ -232,7 +232,7 @@ func TestPlanOffsets(t *testing.T) {
 }
 
 func TestPlanAvoidCam(t *testing.T) {
-	sc, _, oy, iterate := Plan(Advice{Direction: DirAvoidCame, Step: 0.2}, 1.0, 0, 0)
+	sc, _, oy, _, iterate := Plan(Advice{Direction: DirAvoidCame, Step: 0.2}, 1.0, 0, 0, 1)
 	if !iterate {
 		t.Fatal("应该继续迭代")
 	}
@@ -246,11 +246,11 @@ func TestPlanAvoidCam(t *testing.T) {
 
 // 参数已经顶到边界时不该继续空转。
 func TestPlanAtBoundaryStops(t *testing.T) {
-	_, _, _, iterate := Plan(Advice{Direction: DirBigger, Step: 0.2}, 2.0, 0, 0)
+	_, _, _, _, iterate := Plan(Advice{Direction: DirBigger, Step: 0.2}, 2.0, 0, 0, 1)
 	if iterate {
 		t.Error("scale 已在 2.0 上限，不该继续迭代")
 	}
-	_, _, _, iterate = Plan(Advice{Direction: DirRight, Step: 0.1}, 1.0, 0.3, 0)
+	_, _, _, _, iterate = Plan(Advice{Direction: DirRight, Step: 0.1}, 1.0, 0.3, 0, 1)
 	if iterate {
 		t.Error("offsetX 已在 0.3 上限，不该继续迭代")
 	}

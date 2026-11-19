@@ -147,3 +147,29 @@ func TestPromptKeepsContentInsidePrintDomain(t *testing.T) {
 		}
 	}
 }
+
+// 顶部收尾补齐：三条边已贴边且占比大、只剩顶部一线时，纵向拉伸补齐。
+func TestPromptDefinesTopEdgeFinishStretch(t *testing.T) {
+	for _, want := range []string{
+		"顶部收尾补齐",
+		"左右和底部都已经贴边",
+		"把顶部也纵向拉伸到贴住壳边",
+		"只改纵向，不改横向",
+		"stretch_y",
+	} {
+		if !strings.Contains(promptTemplate, want) {
+			t.Errorf("提示词缺少顶部补齐规则：%q", want)
+		}
+	}
+	// 横向拉伸仍只用于左右贴边，纵向拉伸只用于顶部补齐，两者不能混用
+	if !strings.Contains(promptTemplate, "这个拉伸只能用来对齐边缘") {
+		t.Error("左右横向拉伸必须仍限定在贴边对齐上")
+	}
+}
+
+// 合格判定不能靠拉伸改判通过。
+func TestPromptRequiresNeutralStretchWhenGood(t *testing.T) {
+	if !strings.Contains(promptTemplate, "stretch_y=1") {
+		t.Error("good=true 必须要求 stretch_y=1")
+	}
+}

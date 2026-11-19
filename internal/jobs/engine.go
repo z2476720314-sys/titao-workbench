@@ -1165,6 +1165,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	}
 	var (
 		lastMeta        *psx.RenderMetadata
+		nextStretchY    float64 // 下一轮纵向比例（顶部收尾补齐用）
 		flatPick        string  // 最终选中的拼合图
 		chosenScale     float64 // 最终填充倍数
 		chosenNote      string  // 最终选档理由
@@ -1205,6 +1206,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			Scales:          scales,
 			OffsetX:         offX,
 			OffsetY:         offY,
+			StretchY:        nextStretchY,
 			OutDir:          tmp,
 			PSVersion:       def.PSVersion,
 			NoCrop:          opt.NoCrop,
@@ -1422,7 +1424,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			e.logf("info", "  最终评审 %d 分：%s（合格=%t）", adv.Score, adv.Problem, reviewGood)
 			break
 		}
-		nextScale, nx, ny, iterate := tuner.Plan(adv, chosenScale, offX, offY)
+		nextScale, nx, ny, nsy, iterate := tuner.Plan(adv, chosenScale, offX, offY, metaStretchY(meta))
 		if !iterate {
 			if !reviewGood {
 				stopNote = "复核后仍未给出可执行调整"
@@ -1437,7 +1439,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		if !opt.NoCrop && fullBleed && !transparentPadding && nextScale < 1 {
 			nextScale = 1
 		}
-		if nextScale == chosenScale && nx == offX && ny == offY {
+		if nextScale == chosenScale && nx == offX && ny == offY && nsy == metaStretchY(meta) {
 			stopNote = "已到参数约束，无法继续调整"
 			e.logf("info", "  已到参数约束，结束无变化的重复渲染")
 			break
@@ -1446,6 +1448,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		// 下一轮只渲这一档，省 PS 与模型额度
 		scales = []float64{nextScale}
 		offX, offY = nx, ny
+		nextStretchY = nsy
 	}
 
 	if reviewOn && !reviewGood && bestScore >= 0 {

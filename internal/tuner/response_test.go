@@ -55,7 +55,7 @@ func TestCritiqueRechecksRejectedNoOpWithSameImages(t *testing.T) {
 			if calls != 2 || adv.Fallback || adv.Good || adv.Score != 48 {
 				t.Fatalf("rejected no-op not rechecked: calls=%d advice=%+v", calls, adv)
 			}
-			_, _, _, iterate := Plan(adv, 1, 0, 0)
+			_, _, _, _, iterate := Plan(adv, 1, 0, 0, 1)
 			if iterate != repaired {
 				t.Fatalf("repair action=%t want %t", iterate, repaired)
 			}

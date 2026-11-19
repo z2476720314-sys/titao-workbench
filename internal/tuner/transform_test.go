@@ -132,7 +132,7 @@ func TestJointAdviceAppliesSmallCombinedChangesFromActualPlacement(t *testing.T)
 	if adv.Direction == "" || adv.Good {
 		t.Fatal("a complete joint adjustment must be recognized as an unsuccessful review")
 	}
-	scale, x, y, iterate := Plan(adv, 1.2, 0.45, -0.38)
+	scale, x, y, _, iterate := Plan(adv, 1.2, 0.45, -0.38, 1)
 	if !iterate || math.Abs(scale-1.1988) > 1e-12 || math.Abs(x-0.453) > 1e-12 || math.Abs(y-(-0.368)) > 1e-12 {
 		t.Fatalf("joint change was clamped or quantized: scale=%g offset=(%g,%g) iterate=%t", scale, x, y, iterate)
 	}
@@ -144,7 +144,7 @@ func TestJointAdviceIdentityPreservesItsQualityDecision(t *testing.T) {
 		if adv.Direction == "" || adv.Good != good {
 			t.Fatalf("identity adjustment changed the review result: good=%t", good)
 		}
-		_, _, _, iterate := Plan(adv, 0.2, 0.4, 0.5)
+		_, _, _, _, iterate := Plan(adv, 0.2, 0.4, 0.5, 1)
 		if iterate {
 			t.Fatal("identity adjustment must not create an empty rerender")
 		}
@@ -156,7 +156,7 @@ func TestJointAdviceIdentityPreservesItsQualityDecision(t *testing.T) {
 func TestJointPlanLeavesAbsoluteSafetyLimitsToRenderer(t *testing.T) {
 	for _, tc := range []struct{ scale, ratio, want float64 }{{0.2, 0.05, 0.2}, {2, 2, 4}} {
 		adv := parseAdvice(fmt.Sprintf(`{"camera_clear":false,"good":false,"score":60,"problem":"调整","dx":1,"dy":-1,"scale_ratio":%g}`, tc.ratio))
-		scale, x, y, iterate := Plan(adv, tc.scale, 0.8, -0.7)
+		scale, x, y, _, iterate := Plan(adv, tc.scale, 0.8, -0.7, 1)
 		if !iterate || math.Abs(scale-tc.want) > 1e-12 || x != 1.8 || y != -1.7 {
 			t.Fatalf("joint adjustment retained legacy absolute clamps: %g,%g,%g", scale, x, y)
 		}
@@ -168,7 +168,7 @@ func TestJointPlanRejectsInvalidManualAdjustmentsAndOverflow(t *testing.T) {
 		{DX: math.NaN(), ScaleRatio: 1}, {DY: math.Inf(1), ScaleRatio: 1}, {ScaleRatio: math.Inf(1)},
 		{DX: 1.01, ScaleRatio: 1}, {ScaleRatio: 0}, {ScaleRatio: 2.01},
 	} {
-		_, _, _, iterate := Plan(Advice{Transform: &adjustment}, 1, 0, 0)
+		_, _, _, _, iterate := Plan(Advice{Transform: &adjustment}, 1, 0, 0, 1)
 		if iterate {
 			t.Fatal("invalid manually constructed advice must not reach the renderer")
 		}
@@ -178,7 +178,7 @@ func TestJointPlanRejectsInvalidManualAdjustmentsAndOverflow(t *testing.T) {
 		{Good: true, Transform: &Adjustment{ScaleRatio: 0.9}},
 		{Fallback: true, Transform: &Adjustment{ScaleRatio: 0.9}},
 	} {
-		_, _, _, iterate := Plan(advice, math.MaxFloat64, 0, 0)
+		_, _, _, _, iterate := Plan(advice, math.MaxFloat64, 0, 0, 1)
 		if iterate {
 			t.Fatal("overflow, failed or already-good reviews must not cause another render")
 		}

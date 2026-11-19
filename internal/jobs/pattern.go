@@ -661,17 +661,17 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			stopNote = "模型评审未完成，请人工复核"
 			break
 		}
-		next, nx, ny, iterate := tuner.Plan(adv, canvas.Placement.Scale, canvas.Placement.OffsetX, canvas.Placement.OffsetY)
+		next, nx, ny, nsy, iterate := tuner.Plan(adv, canvas.Placement.Scale, canvas.Placement.OffsetX, canvas.Placement.OffsetY, canvas.Placement.VerticalStretch())
 		if !iterate {
 			stopNote = "复核后仍无可执行的全组调整，请人工复核"
-			e.logf("warn", "  第%d轮模型建议无法执行：dx=%v dy=%v scale_ratio=%v（当前 scale=%.3f）",
-				round, adjustmentOf(adv).DX, adjustmentOf(adv).DY, adjustmentOf(adv).ScaleRatio, canvas.Placement.Scale)
+			e.logf("warn", "  第%d轮模型建议无法执行：dx=%v dy=%v scale_ratio=%v stretch_y=%v（当前 scale=%.3f）",
+				round, adjustmentOf(adv).DX, adjustmentOf(adv).DY, adjustmentOf(adv).ScaleRatio, adjustmentOf(adv).StretchY, canvas.Placement.Scale)
 			break
 		}
-		e.logf("info", "  第%d轮调整为 scale=%.3f offset=(%.3f,%.3f)（上轮 scale=%.3f offset=(%.3f,%.3f)）",
-			round+1, next, nx, ny, canvas.Placement.Scale, canvas.Placement.OffsetX, canvas.Placement.OffsetY)
+		e.logf("info", "  第%d轮调整为 scale=%.3f offset=(%.3f,%.3f) 纵向比例=%.4f（上轮 scale=%.3f offset=(%.3f,%.3f) 纵向比例=%.4f）",
+			round+1, next, nx, ny, nsy, canvas.Placement.Scale, canvas.Placement.OffsetX, canvas.Placement.OffsetY, canvas.Placement.VerticalStretch())
 		scale, request.OffsetX, request.OffsetY = next, nx, ny
-		request.StretchY = canvas.Placement.VerticalStretch()
+		request.StretchY = nsy
 	}
 	if !wait() {
 		return

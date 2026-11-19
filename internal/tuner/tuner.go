@@ -70,6 +70,10 @@ type Advice struct {
 // Adjustment 是相对本轮实际壳面画布的位移增量与实际倍率的乘数。
 type Adjustment struct {
 	DX, DY, ScaleRatio float64
+	// StretchY 是纵向拉伸倍数（1 = 不拉伸）。
+	// 用于「左右和底部都已贴边、只差顶部一线」时把顶部补齐：
+	// 只改纵向比例，不动横向，避免整体重排。
+	StretchY float64
 }
 
 // 调整方向常量。
@@ -94,10 +98,10 @@ const maxSingleStepShrink = 0.75
 // systemPrompt 只放角色、输出契约和硬门槛；判定细则在 user message 的 promptTemplate 里，
 // 避免同一套规则在两条消息里各写一遍、彼此矛盾。
 const systemPrompt = `你是手机壳套图成品的质检员。只输出一行完整 JSON，不分析、不加 Markdown、不写解释。
-字段固定七个：good(boolean)、camera_clear(boolean)、score(0至100整数)、problem(string)、dx(number)、dy(number)、scale_ratio(number)。
+字段固定八个：good(boolean)、camera_clear(boolean)、score(0至100整数)、problem(string)、dx(number)、dy(number)、scale_ratio(number)、stretch_y(number)。
 判定顺序：先看原图重要文字、主脸、主头部轮廓和主要物体整体是否完整可见，再看这些内容是否被镜头孔覆盖，最后才看构图。
 壳边透明框、留白、阴影、模板手指、挂绳、反光都不可作为判不合格的依据。
-good=true 必须同时满足：score>=85、camera_clear=true、dx=0、dy=0、scale_ratio=1。字段缺失、格式错误、截断输出都不代表合格。
+good=true 必须同时满足：score>=85、camera_clear=true、dx=0、dy=0、scale_ratio=1、stretch_y=1。字段缺失、格式错误、截断输出都不代表合格。
 按本轮已渲染的成品判断，不得填写调整后的预期结果。`
 
 const promptTemplate = `【任务】审查本轮成品，判断原图重要内容是否完整、是否被镜头孔切断、是否被照片边缘裁掉，并给出一次可执行的修正。
@@ -116,9 +120,10 @@ const promptTemplate = `【任务】审查本轮成品，判断原图重要内�
 - 左右竖直切线：图案某一侧若有一条竖直直线把图案切断，成品该侧必须贴住壳边，不得留缝；左右两侧都有竖直切线时，横向拉伸到同时贴住两边（只改横向，不动纵向比例）。这个拉伸只能用来对齐边缘，不能把内容推出壳面。
 - 没有笔直切线就没有贴边义务：图案边缘是自然弧形、随手绘制的收边、或是完整独立的图形轮廓时，不需要贴壳边，正常留白即可，不要为了"对齐"去硬贴。
 - 内容不能越界：任何位移、缩放、拉伸之后，全部有效内容仍须留在印刷域内。贴边与不越界冲突时，先保不越界，报告冲突。
+- 顶部收尾补齐：当左右和底部都已经贴边、图案在壳面上占比明显较大，只剩下顶部还差一点点没贴住时，把顶部也纵向拉伸到贴住壳边（只改纵向，不改横向）。这是收尾动作，前提是三条边确实都已贴边且占比够大；只差一线就补齐，不要为了一点缝隙整体重排。
 - 优先横移 dx 绕开镜头；横移被边界夹回时改纵移 dy，或小幅缩小。
 - 单轮 scale_ratio 不低于 0.55。已是 0.55 仍无法露出重要内容的，判 false、返回 0/0/1 并写明具体冲突，不得改判合格。
-- dx、dy、scale_ratio 三项独立给出，不设固定步长、不用预设方向，可同时调整。
+- dx、dy、scale_ratio、stretch_y 四项独立给出，不设固定步长、不用预设方向，可同时调整。stretch_y 是纵向拉伸倍数，只有「收尾补齐」时才不等于 1，其余情况一律填 1。
 - 比较本轮请求与实际位置：若被印刷域或直边约束夹回（画布未改变），本轮必须换方向或组合调整，不能重复同一组无效参数。
 
 【常见误判，不要犯】
@@ -129,9 +134,9 @@ const promptTemplate = `【任务】审查本轮成品，判断原图重要内�
 - 成品黑白区域与原图一致时，不得臆测成透明渲染错误。
 - 问题描述必须点名具体哪一字、哪一主体、哪一部位新增缺失，不写"左侧""顶部"这类笼统位置。
 
-【输出】只输出一行完整 JSON，七字段齐全，不分析、不加 Markdown：
-{"good":false,"camera_clear":false,"score":0,"problem":"具体问题20字内，无问题写无","dx":0,"dy":0,"scale_ratio":1}
-score 为 0 至 100 整数，只按第 1 条的内容完整与镜头避让打分，不按壳框、留白、阴影、手指或模板自带文字打分。dx/dy 在 [-1,1]，scale_ratio 在 [0.55,2]。good=true 必须同时满足 score>=85、camera_clear=true、dx=dy=0、scale_ratio=1。`
+【输出】只输出一行完整 JSON，八字段齐全，不分析、不加 Markdown：
+{"good":false,"camera_clear":false,"score":0,"problem":"具体问题20字内，无问题写无","dx":0,"dy":0,"scale_ratio":1,"stretch_y":1}
+score 为 0 至 100 整数，只按第 1 条的内容完整与镜头避让打分，不按壳框、留白、阴影、手指或模板自带文字打分。dx/dy 在 [-1,1]，scale_ratio 在 [0.55,2]，stretch_y 在 [0.90,1.12]。good=true 必须同时满足 score>=85、camera_clear=true、dx=dy=0、scale_ratio=1、stretch_y=1。`
 
 // 合法的 direction 取值集合，模型乱写时用来收敛。
 var validDirs = map[string]bool{
@@ -254,11 +259,11 @@ func critique(cfg Config, jpeg []byte, placement judge.Placement, remaining *tim
 		if adv.Direction != "" {
 			adv.Usage = parsed.Usage
 			adv.Raw = strings.TrimSpace(reply.Message.Content)
-			_, _, _, iterate := Plan(adv, 1, 0, 0)
+			_, _, _, _, iterate := Plan(adv, 1, 0, 0, 1)
 			if attempt == 0 && !adv.Good && !iterate && !(cameraOnly && adv.CameraClear) {
 				body["messages"] = append(messages,
 					map[string]any{"role": "assistant", "content": adv.Raw},
-					map[string]any{"role": "user", "content": "本轮不合格但你未给出任何调整。重新对照原图和成品，按实际壳面参数给出一次可执行的联合缩放与位移：优先解决主字主脸的镜头遮挡；遮挡已避开时，若图案有笔直切线（横向或竖直的直线切断）却没贴住对应壳边，就用位移把它贴上去，左右两侧都有竖直切线时横向拉伸到同时贴边，同时保证内容不越界。确实没有安全解才返回0/0/1，并说明具体冲突；不要把没有尝试的方向当作无解，也不要改判合格来回避调整。只输出七字段最终JSON。"})
+					map[string]any{"role": "user", "content": "本轮不合格但你未给出任何调整。重新对照原图和成品，按实际壳面参数给出一次可执行的联合缩放与位移：优先解决主字主脸的镜头遮挡；遮挡已避开时，若图案有笔直切线（横向或竖直的直线切断）却没贴住对应壳边，就用位移把它贴上去，左右两侧都有竖直切线时横向拉伸到同时贴边，同时保证内容不越界。确实没有安全解才返回0/0/1，并说明具体冲突；不要把没有尝试的方向当作无解，也不要改判合格来回避调整。只输出八字段最终JSON。"})
 				continue
 			}
 			// 逐格复核已废弃：现在每轮只送一张最能代表全组的正面图（见 jobs.pickReviewView），
@@ -267,7 +272,7 @@ func critique(cfg Config, jpeg []byte, placement judge.Placement, remaining *tim
 		}
 		if attempt == 0 {
 			// Reassess the same images once; never manufacture advice from partial analysis.
-			body["messages"] = append(messages, map[string]any{"role": "user", "content": "重新核对原图与本轮成品，只返回完整最终JSON：good、camera_clear、score、problem、dx、dy、scale_ratio。camera_clear判断本轮主要内容是否已避镜头，不含贴边或调整预期。字段齐全且数值合法；合格必须score>=85、camera_clear=true及0/0/1。不分析、不借格式错误判断合格。"})
+			body["messages"] = append(messages, map[string]any{"role": "user", "content": "重新核对原图与本轮成品，只返回完整最终JSON：good、camera_clear、score、problem、dx、dy、scale_ratio、stretch_y。camera_clear判断本轮主要内容是否已避镜头，不含贴边或调整预期。字段齐全且数值合法；合格必须score>=85、camera_clear=true及0/0/1/1。不分析、不借格式错误判断合格。"})
 		}
 	}
 	return fallback(fmt.Errorf("%s；格式重试后仍未确认，请人工复核", issue))
@@ -314,6 +319,7 @@ func parseAdvice(blob string) Advice {
 		DX          *float64      `json:"dx"`
 		DY          *float64      `json:"dy"`
 		ScaleRatio  *float64      `json:"scale_ratio"`
+		StretchY    *float64      `json:"stretch_y"`
 		Direction   string        `json:"direction"`
 		Step        float64       `json:"step"`
 	}
@@ -325,12 +331,16 @@ func parseAdvice(blob string) Advice {
 	if result.Good != nil && *result.Good && *result.Score < 85 {
 		return Advice{}
 	}
-	if fields["dx"] != nil || fields["dy"] != nil || fields["scale_ratio"] != nil {
+	if fields["dx"] != nil || fields["dy"] != nil || fields["scale_ratio"] != nil || fields["stretch_y"] != nil {
 		if result.Good == nil || result.CameraClear == nil || result.Problem == nil || result.DX == nil || result.DY == nil || result.ScaleRatio == nil || fields["direction"] != nil || fields["step"] != nil {
 			return Advice{}
 		}
-		adjustment := Adjustment{DX: *result.DX, DY: *result.DY, ScaleRatio: *result.ScaleRatio}
-		if !validAdjustment(adjustment) || (*result.Good && (!*result.CameraClear || adjustment.DX != 0 || adjustment.DY != 0 || adjustment.ScaleRatio != 1)) {
+		stretch := 1.0
+		if result.StretchY != nil {
+			stretch = *result.StretchY
+		}
+		adjustment := Adjustment{DX: *result.DX, DY: *result.DY, ScaleRatio: *result.ScaleRatio, StretchY: stretch}
+		if !validAdjustment(adjustment) || (*result.Good && (!*result.CameraClear || adjustment.DX != 0 || adjustment.DY != 0 || adjustment.ScaleRatio != 1 || adjustment.StretchY != 1)) {
 			return Advice{}
 		}
 		return Advice{Good: *result.Good, CameraClear: *result.CameraClear, Score: int(*result.Score), Problem: strings.TrimSpace(*result.Problem), Direction: DirTransform, Transform: &adjustment}
@@ -372,7 +382,11 @@ func finite(values ...float64) bool {
 }
 
 func validAdjustment(a Adjustment) bool {
-	return finite(a.DX, a.DY, a.ScaleRatio) && math.Abs(a.DX) <= 1 && math.Abs(a.DY) <= 1 && a.ScaleRatio >= 0.05 && a.ScaleRatio <= 2
+	return finite(a.DX, a.DY, a.ScaleRatio, a.StretchY) && math.Abs(a.DX) <= 1 && math.Abs(a.DY) <= 1 &&
+		a.ScaleRatio >= 0.05 && a.ScaleRatio <= 2 &&
+		// 纵向拉伸只用于补齐顶部一线，限制在 0.90~1.12：
+		// 超出这个范围就不是「收尾补齐」而是明显压扁/拉长主体。
+		a.StretchY >= 0.90 && a.StretchY <= 1.12
 }
 
 // clampStep 把模型给的幅度限制在 0.05~0.3，避免一步跳太远。
@@ -405,13 +419,21 @@ func fallback(err error) Advice {
 //   - bigger/smaller → 以当前 scale 为中心按 step 展开 3 档；
 //   - up/down/left/right → scale 不变，只调 offset；
 //   - avoid_cam → 先缩小 step，再按当前重心偏移的反方向微移。
-func Plan(adv Advice, scale, offsetX, offsetY float64) (nextScale float64, nextOffX, nextOffY float64, iterate bool) {
+// Plan 根据评审建议算出下一轮要用的参数。
+//
+// 入参是上一轮选中的实际参数（scale 为相对铺满的倍数，
+// offsetX/offsetY 为相对画布宽高的比例偏移，stretchY 为本轮纵向比例）。
+// 返回下一轮的参数、下一轮的纵向比例，以及「是否有必要再迭代」。
+func Plan(adv Advice, scale, offsetX, offsetY, stretchY float64) (nextScale float64, nextOffX, nextOffY, nextStretchY float64, iterate bool) {
+	if !finite(stretchY) || stretchY <= 0 {
+		stretchY = 1
+	}
 	if adv.Good || adv.Fallback || !finite(scale, offsetX, offsetY) || scale <= 0 {
-		return scale, offsetX, offsetY, false
+		return scale, offsetX, offsetY, stretchY, false
 	}
 	if adv.Transform != nil {
 		if !validAdjustment(*adv.Transform) {
-			return scale, offsetX, offsetY, false
+			return scale, offsetX, offsetY, stretchY, false
 		}
 		nextScale = scale * adv.Transform.ScaleRatio
 		if nextScale < scale*maxSingleStepShrink {
@@ -419,13 +441,20 @@ func Plan(adv Advice, scale, offsetX, offsetY float64) (nextScale float64, nextO
 		}
 		nextScale = clampScaleFloor(nextScale, scale)
 		nextOffX, nextOffY = offsetX+adv.Transform.DX, offsetY+adv.Transform.DY
-		if !finite(nextScale, nextOffX, nextOffY) || nextScale <= 0 {
-			return scale, offsetX, offsetY, false
+		nextStretchY = stretchY
+		if adv.Transform.StretchY > 0 && adv.Transform.StretchY != 1 {
+			nextStretchY = stretchY * adv.Transform.StretchY
+			// 累积拉伸也要有界，避免多轮叠加把主体拉变形。
+			nextStretchY = math.Max(0.90, math.Min(1.12, nextStretchY))
 		}
-		return nextScale, nextOffX, nextOffY, nextScale != scale || nextOffX != offsetX || nextOffY != offsetY
+		if !finite(nextScale, nextOffX, nextOffY, nextStretchY) || nextScale <= 0 {
+			return scale, offsetX, offsetY, stretchY, false
+		}
+		return nextScale, nextOffX, nextOffY, nextStretchY,
+			nextScale != scale || nextOffX != offsetX || nextOffY != offsetY || nextStretchY != stretchY
 	}
 	if adv.Good || adv.Direction == DirNone || adv.Direction == "" {
-		return scale, offsetX, offsetY, false
+		return scale, offsetX, offsetY, stretchY, false
 	}
 
 	step := clampStep(adv.Step)
@@ -449,7 +478,7 @@ func Plan(adv Advice, scale, offsetX, offsetY float64) (nextScale float64, nextO
 	case DirRight:
 		nextOffX = offsetX + step
 	default:
-		return scale, offsetX, offsetY, false
+		return scale, offsetX, offsetY, stretchY, false
 	}
 
 	nextScale = clampScale(nextScale)
@@ -458,9 +487,9 @@ func Plan(adv Advice, scale, offsetX, offsetY float64) (nextScale float64, nextO
 
 	// 参数已经顶到边界还让继续调，说明调不动了，直接收工
 	if nextScale == scale && nextOffX == offsetX && nextOffY == offsetY {
-		return scale, offsetX, offsetY, false
+		return scale, offsetX, offsetY, stretchY, false
 	}
-	return nextScale, nextOffX, nextOffY, true
+	return nextScale, nextOffX, nextOffY, stretchY, true
 }
 
 // clampScale 限制填充倍数：小于 0.3 太空、大于 2.0 必然裁坏。

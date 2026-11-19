@@ -178,3 +178,15 @@ func anchorConflict(meta *psx.RenderMetadata) string {
 	}
 	return "约束冲突：当前校准下角度" + strings.Join(cells, "、") + "无法共用同一印刷位置并同时保全内容与双侧贴边；停止模型微调"
 }
+
+// metaStretchY 从渲染回执里取本轮实际纵向比例，缺省视为 1。
+// 多轮微调时下一轮要在这一轮的真实比例上继续累积，而不是每次都从 1 开始。
+func metaStretchY(meta *psx.RenderMetadata) float64 {
+	if meta == nil || len(meta.Placements) == 0 {
+		return 1
+	}
+	if v := meta.Placements[0].VerticalStretch(); v > 0 {
+		return v
+	}
+	return 1
+}
