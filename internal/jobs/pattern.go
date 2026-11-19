@@ -334,7 +334,18 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 	} else if autoLayout {
 		fit = psx.FitCover
 	}
-	request := psx.RenderRequest{Pattern: pattern, Fit: fit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, ContentBounds: pr.ContentBounds, AnchorX: pr.AnchorX, AnchorY: pr.AnchorY, AlignBottom: !opt.NoCrop && pr.BottomContent && fitIsContainLike(fit)}
+	// 贴底入口：`AlignBottom` 只在非 NoCrop 的手动摆位里被读取
+	// （printcanvas.manualPlacement）。NoCrop 走 FitArtwork，那是独立的几何
+	// 求解器，根本不看 AlignBottom，所以从 v0.3.11 起 NoCrop 模式贴底一直失效。
+	// NoCrop 下的贴底只能由 AnchorY=1 表达：让下边贴住印刷域底边。
+	alignBottom := pr.BottomContent && fitIsContainLike(fit)
+	if alignBottom && opt.NoCrop {
+		// 已有更精确的锚点（2=对边铺满）时不要降级成单边贴底。
+		if pr.AnchorY != 2 {
+			pr.AnchorY = 1
+		}
+	}
+	request := psx.RenderRequest{Pattern: pattern, Fit: fit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, ContentBounds: pr.ContentBounds, AnchorX: pr.AnchorX, AnchorY: pr.AnchorY, AlignBottom: alignBottom && !opt.NoCrop}
 	scale := 1.0
 	if !opt.Auto && len(opt.Scales) > 0 {
 		scale = opt.Scales[0]
