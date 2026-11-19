@@ -59,9 +59,12 @@ func TestPatternTuningRerendersEveryTemplateWithOneCanvasVersion(t *testing.T) {
 			t.Error(err)
 		}
 		b, _ := json.Marshal(body["messages"])
-		reply := `{"good":true,"camera_clear":true,"score":95,"problem":"无","dx":0,"dy":0,"scale_ratio":1}`
-		if len(ps.requests) == 2 && strings.Contains(string(b), "template-b") {
-			reply = `{"good":false,"camera_clear":false,"score":50,"problem":"主脸被挡","dx":0.05,"dy":0.1,"scale_ratio":0.9}`
+		_ = b
+		// 首轮给出一次调整，逼出第二轮渲染，用来验证两个模板共用同一版画布。
+		// （多模板只评审第一个模板，所以这里不再按 template-b 分支。）
+		reply := `{"good":false,"camera_clear":false,"score":50,"problem":"主脸被挡","dx":0.05,"dy":0.1,"scale_ratio":0.9}`
+		if len(ps.requests) > 2 {
+			reply = `{"good":true,"camera_clear":true,"score":95,"problem":"无","dx":0,"dy":0,"scale_ratio":1}`
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": reply}}}})
 	}))
@@ -350,7 +353,8 @@ func TestPlanRejectsDifferentPatternsWithSameOutputDirectory(t *testing.T) {
 // 全组共用同一套摆放参数，图案压镜头这件事每格都会发生，只是露出角度不同。
 // 逐格送审等于把同一个问题问 7 遍——实测每张 35-47s、prompt 5000+ tokens，
 // 是套图耗时的绝对大头。这里验证：3 个模板 → 3 次评审调用（不是 3×格数）。
-func TestGroupReviewsOneRepresentativeViewPerTemplate(t *testing.T) {
+// 同一图案多模板：只评审第一个模板，其余模板复用它的结论。
+func TestGroupReviewsOnlyFirstTemplate(t *testing.T) {
 	e, _, _ := newTestEngine(t)
 	e.ps = &reviewPhotoshop{cells: 3}
 	tasks, output := patternGroupInputs(t)
@@ -377,8 +381,9 @@ func TestGroupReviewsOneRepresentativeViewPerTemplate(t *testing.T) {
 	}))
 	defer srv.Close()
 	e.processPattern(context.Background(), Options{Auto: true, NoCrop: true, Fit: "auto", Scales: []float64{1}, CellSize: 80, JPGQuality: 90, MaxRounds: 3}, cfg.Default(), judge.Config{BaseURL: srv.URL, Model: "fixture", MaxTokens: 512, Timeout: 3 * time.Second}, tasks, output, 1, 2)
-	if calls.Load() != int32(len(tasks)) {
-		t.Fatalf("每个模板应只发一次评审，实际 calls=%d，模板数=%d", calls.Load(), len(tasks))
+	// 同一图案的多个模板共用画布与参数，只评审第一个模板，其余复用结论
+	if calls.Load() != 1 {
+		t.Fatalf("只应评审第一个模板一次，实际 calls=%d，模板数=%d", calls.Load(), len(tasks))
 	}
 	if multiImage.Load() != 0 {
 		t.Fatalf("不应把多张成品塞进同一条请求，实际 %d 条超限", multiImage.Load())

@@ -239,13 +239,14 @@ func TestPatternPauseStopsQueuedReviews(t *testing.T) {
 					}
 				}
 				arrived <- struct{}{}
-				if n <= 2 {
+				if n <= 1 {
 					<-release
 				}
-				// 首轮两模板判不合格，恢复后第二轮才合格：
+				// 每轮只评审第一个模板，所以首轮就是 n=1。
+				// 首轮判不合格、恢复后第二轮才合格：
 				// 这样才存在「排队的评审」和「恢复后继续跑」，能测出暂停是否漏放请求。
 				reply := `{"good":true,"camera_clear":true,"score":95,"problem":"无","dx":0,"dy":0,"scale_ratio":1}`
-				if n <= 2 {
+				if n <= 1 {
 					reply = `{"good":false,"camera_clear":false,"score":50,"problem":"主脸被挡","dx":0.05,"dy":0.1,"scale_ratio":0.9}`
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": reply}}}})
@@ -264,8 +265,8 @@ func TestPatternPauseStopsQueuedReviews(t *testing.T) {
 			}
 			awaitPauseRender(t, ps.started)
 			awaitPauseRender(t, ps.started)
-			// 两个模板，每个每轮只发 1 次评审 = 2 次
-			for range 2 {
+			// 只用第一个模板评审，每轮 1 次
+			for range 1 {
 				select {
 				case <-arrived:
 				case <-time.After(5 * time.Second):
@@ -277,13 +278,13 @@ func TestPatternPauseStopsQueuedReviews(t *testing.T) {
 			}
 			releaseOnce.Do(func() { close(release) })
 			assertPatternPaused(t, e, ps)
-			if calls.Load() != 2 || peak.Load() > 2 {
+			if calls.Load() != 1 || peak.Load() > 2 {
 				t.Fatalf("pause started queued reviews: calls=%d peak=%d", calls.Load(), peak.Load())
 			}
 			if action == "stop" {
 				e.Stop()
 				assertPatternStopped(t, e, output)
-				if calls.Load() != 2 {
+				if calls.Load() != 1 {
 					t.Fatalf("stop started queued reviews: %d", calls.Load())
 				}
 				if event := rec.doneEvent(); event == nil || !strings.Contains(event.Message, "已停止") {
@@ -295,7 +296,8 @@ func TestPatternPauseStopsQueuedReviews(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitFor(t, "resumed queued reviews", func() bool { return e.State() == StateIdle })
-			if calls.Load() != 4 || ps.count.Load() != 4 || peak.Load() > 2 {
+			// 2 轮，每轮只评审第一个模板 = 2 次；每个模板每轮都渲染 = 4 次
+			if calls.Load() != 2 || ps.count.Load() != 4 || peak.Load() > 2 {
 				t.Fatalf("resume repeated/skipped work: calls=%d renders=%d peak=%d", calls.Load(), ps.count.Load(), peak.Load())
 			}
 			for _, task := range e.Tasks() {

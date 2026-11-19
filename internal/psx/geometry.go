@@ -39,9 +39,19 @@ func (p AppliedPlacement) VerticalStretch() float64 {
 	return p.StretchY
 }
 
+// 纵向拉伸的可接受区间。
+//
+// 下界 0.97 保持「轻微调整」的原有保护，不让图案被明显压扁；
+// 上界 1.08 是为「顶部收尾补齐」放宽的：左右和底部都贴住后，
+// 顶部常差 3%~8%，1.03 的上限会让这类请求整轮构建失败。
+const (
+	MinVerticalStretch = 0.97
+	MaxVerticalStretch = 1.08
+)
+
 func (p AppliedPlacement) ValidStretch() bool {
 	ratio := p.VerticalStretch()
-	return geometryFinite(ratio) && ratio >= .97 && ratio <= 1.03
+	return geometryFinite(ratio) && ratio >= MinVerticalStretch && ratio <= MaxVerticalStretch
 }
 
 // CalibrateVisibleAreas decodes R=u*255, G=v*255, B=128 opaque UV exports.

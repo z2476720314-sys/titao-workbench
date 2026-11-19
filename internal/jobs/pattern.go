@@ -455,6 +455,11 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			candidate.good, candidate.clear, candidate.score = false, false, 0
 			stopNote = "统一印刷画布无法同时满足内容完整和直边贴合，请人工复核"
 		} else if reviewOn {
+			// 同一图案的多个模板共用一套印刷画布与摆放参数，评审一次即可：
+			// 微调值是全局的，第二个模板再问一遍只是把同一个问题再问一次，
+			// 每多问一次就多一次视觉请求（单次 35-47s）。因此只用第一个模板送审，
+			// 其余模板直接复用它的结论。
+			const reviewTemplate = 0
 			allViews := make([][][]byte, len(candidate.projections))
 			allCells := make([][]int, len(candidate.projections))
 			diagnosticViews := make([]bool, len(candidate.projections))
@@ -501,7 +506,7 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			var wg sync.WaitGroup
 			sem := make(chan struct{}, 4)
 			replies := make([][]tuner.Advice, len(tasks))
-			for i, projection := range candidate.projections {
+			for i, projection := range candidate.projections[:reviewTemplate+1] {
 				// 只挑一张能完整看到壳面正面的图送评审，不再逐格都发。
 				// 理由：7 格共用同一套摆放参数，任何一格的遮挡都等价于全组的问题，
 				// 而每多发一张就是一次完整的视觉请求（实测单次 35-47s、prompt 5000+ tokens）。
@@ -539,7 +544,7 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 					}
 				}
 				check.Scale, check.OffsetX, check.OffsetY = canvas.Placement.Scale, canvas.Placement.OffsetX, canvas.Placement.OffsetY
-				check.AppliedSummary += fmt.Sprintf("同一图案全部模板使用公共印刷画布，canvas_sha=%s；当前模板=%s。程序验证公共画布直边已贴合=%t。手机壳边框、透明框、阴影不属于待评项，不得因这些给出不合格或放大建议；但图案自身有笔直切线（竖直或水平的直线切断）却没贴住对应壳边时，贴边属于待评问题，必须指出。当前纵横相对比例=%.6g；轻微比例调整限制在0.97至1.03，不能靠明显压扁主体来避镜头。数值只针对公共印刷域，任何调整使所有模板同步重投影，禁止单独改变一张的位置。", canvas.SHA256, projection.TemplateName, !canvas.Placement.AnchorUnmet, canvas.Placement.VerticalStretch())
+				check.AppliedSummary += fmt.Sprintf("同一图案全部模板使用公共印刷画布，canvas_sha=%s；当前模板=%s。程序验证公共画布直边已贴合=%t。手机壳边框、透明框、阴影不属于待评项，不得因这些给出不合格或放大建议；但图案自身有笔直切线（竖直或水平的直线切断）却没贴住对应壳边时，贴边属于待评问题，必须指出。当前纵横相对比例=%.6g；纵向比例允许范围是0.97至1.08，其中超过1.03只用于顶部收尾补齐，不能靠明显压扁或拉长主体来避镜头。数值只针对公共印刷域，任何调整使所有模板同步重投影，禁止单独改变一张的位置。", canvas.SHA256, projection.TemplateName, !canvas.Placement.AnchorUnmet, canvas.Placement.VerticalStretch())
 				if reused {
 					check.AppliedSummary += "上次请求被印刷域或直边约束夹回，画布未改变；请联合调整缩小、位移或左右拉伸，不能重复无效建议。"
 				}
@@ -568,6 +573,13 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			}
 			for i := range replies {
 				candidate.advice[i] = combinePhotoAdvice(replies[i], allCells[i])
+			}
+			// 其余模板复用第一个模板的评审结论：画布与参数是共享的，
+			// 分别评审只会得到互相冲突的建议，还多花数倍时间。
+			for i := reviewTemplate + 1; i < len(candidate.advice); i++ {
+				candidate.advice[i] = candidate.advice[reviewTemplate]
+				e.logf("dim", "  %s 复用 %s 的评审结论（同一图案共用画布与参数）",
+					tasks[i].TemplateName, tasks[reviewTemplate].TemplateName)
 			}
 			for i, adv := range candidate.advice {
 				if adv.Fallback {

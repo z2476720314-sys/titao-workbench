@@ -13,7 +13,8 @@ func TestCanonicalValidatorsRejectExcessiveStretchEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, ratio := range []float64{.96, 1.04, -1, math.NaN(), math.Inf(1)} {
+	// 上界是 psx.MaxVerticalStretch（1.08）；超过它才算「明显变形」。
+	for _, ratio := range []float64{.96, 1.09, 1.2, -1, math.NaN(), math.Inf(1)} {
 		c.Placement.StretchY = ratio
 		if err := Validate(c); err == nil {
 			t.Errorf("builder validator accepted stretch %v", ratio)
@@ -84,7 +85,8 @@ func TestSubtleAspectCanSatisfyBothPairedAxes(t *testing.T) {
 
 func TestBuildRejectsInvalidRequestedAspect(t *testing.T) {
 	source := patternFile(t, solid(94, 189))
-	for _, ratio := range []float64{.96, 1.04, -1, math.NaN(), math.Inf(1)} {
+	// 上界是 psx.MaxVerticalStretch（1.08）；超过它才算「明显变形」。
+	for _, ratio := range []float64{.96, 1.09, 1.2, -1, math.NaN(), math.Inf(1)} {
 		if _, err := Build(source, filepath.Join(t.TempDir(), "canvas.png"), psx.RenderRequest{NoCrop: true, StretchY: ratio}, 1); err == nil {
 			t.Errorf("invalid input aspect accepted: %v", ratio)
 		}

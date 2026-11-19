@@ -3,6 +3,8 @@ package tuner
 import (
 	"math"
 	"testing"
+
+	"titao/internal/psx"
 )
 
 // 「左右和底部都已贴边、图案占比大、只剩顶部差一点」时的收尾补齐：
@@ -28,19 +30,19 @@ func TestPlanStretchAccumulationIsBounded(t *testing.T) {
 		_, _, _, next, _ := Plan(Advice{Transform: &Adjustment{ScaleRatio: 1, StretchY: 1.12}}, 1.0, 0, 0, stretch)
 		stretch = next
 	}
-	if stretch > 1.12+1e-9 {
+	if stretch > psx.MaxVerticalStretch+1e-9 {
 		t.Fatalf("累积拉伸超过上限：%v", stretch)
 	}
 }
 
 // 越界的 stretch_y 整条建议作废，不能部分采纳。
 func TestAdjustmentRejectsOutOfRangeStretch(t *testing.T) {
-	for _, v := range []float64{0.5, 0.89, 1.13, 2, math.NaN(), math.Inf(1)} {
+	for _, v := range []float64{0.5, 0.96, 1.09, 2, math.NaN(), math.Inf(1)} {
 		if validAdjustment(Adjustment{ScaleRatio: 1, StretchY: v}) {
 			t.Fatalf("stretch_y=%v 应被拒绝", v)
 		}
 	}
-	for _, v := range []float64{0.90, 1.0, 1.05, 1.12} {
+	for _, v := range []float64{0.97, 1.0, 1.05, 1.08} {
 		if !validAdjustment(Adjustment{ScaleRatio: 1, StretchY: v}) {
 			t.Fatalf("stretch_y=%v 应被接受", v)
 		}

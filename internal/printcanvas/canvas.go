@@ -72,7 +72,7 @@ func Build(pattern, output string, req psx.RenderRequest, scale float64) (*psx.P
 		// Only anchor comparisons tolerate roundoff; source containment stays strict.
 		area := psx.VisibleArea{Polygon: []psx.Point{{0, 0}, {1, 0}, {1, 1}, {0, 1}}, EdgeTolerance: 1e-6}
 		fitAtRatio := func(ratio float64, preferOffsets bool) (psx.AppliedPlacement, error) {
-			virtualHeight := max(int(math.Ceil(float64(b.Dy())*.97)), min(int(math.Floor(float64(b.Dy())*1.03)), int(math.Round(float64(b.Dy())*ratio))))
+			virtualHeight := max(int(math.Ceil(float64(b.Dy())*psx.MinVerticalStretch)), min(int(math.Floor(float64(b.Dy())*psx.MaxVerticalStretch)), int(math.Round(float64(b.Dy())*ratio))))
 			virtualBase := math.Min(float64(Width)/float64(b.Dx()), float64(Height)/float64(virtualHeight))
 			result, err := psx.FitArtwork(area, hull, Width, Height, b.Dx(), virtualHeight, scale*base/virtualBase, req.OffsetX, req.OffsetY, req.AnchorX, req.AnchorY, preferOffsets)
 			result.Scale *= virtualBase / base

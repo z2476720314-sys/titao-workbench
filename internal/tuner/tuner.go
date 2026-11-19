@@ -384,9 +384,9 @@ func finite(values ...float64) bool {
 func validAdjustment(a Adjustment) bool {
 	return finite(a.DX, a.DY, a.ScaleRatio, a.StretchY) && math.Abs(a.DX) <= 1 && math.Abs(a.DY) <= 1 &&
 		a.ScaleRatio >= 0.05 && a.ScaleRatio <= 2 &&
-		// 纵向拉伸只用于补齐顶部一线，限制在 0.90~1.12：
-		// 超出这个范围就不是「收尾补齐」而是明显压扁/拉长主体。
-		a.StretchY >= 0.90 && a.StretchY <= 1.12
+		// 纵向拉伸只用于补齐顶部一线，区间与 psx 的 ValidStretch 保持一致：
+		// 两处各写一个魔数曾在 v0.3.22 造成「模型给了 1.05、画布直接构建失败」。
+		a.StretchY >= psx.MinVerticalStretch && a.StretchY <= psx.MaxVerticalStretch
 }
 
 // clampStep 把模型给的幅度限制在 0.05~0.3，避免一步跳太远。
@@ -445,7 +445,7 @@ func Plan(adv Advice, scale, offsetX, offsetY, stretchY float64) (nextScale floa
 		if adv.Transform.StretchY > 0 && adv.Transform.StretchY != 1 {
 			nextStretchY = stretchY * adv.Transform.StretchY
 			// 累积拉伸也要有界，避免多轮叠加把主体拉变形。
-			nextStretchY = math.Max(0.90, math.Min(1.12, nextStretchY))
+			nextStretchY = math.Max(psx.MinVerticalStretch, math.Min(psx.MaxVerticalStretch, nextStretchY))
 		}
 		if !finite(nextScale, nextOffX, nextOffY, nextStretchY) || nextScale <= 0 {
 			return scale, offsetX, offsetY, stretchY, false
