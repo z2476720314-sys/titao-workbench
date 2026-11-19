@@ -768,6 +768,15 @@
     }
   }
 
+  // 定位按钮：后端失败时要把原因显示出来，否则用户只看到「点了没反应」。
+  async function revealFile(path: string) {
+    try {
+      await api.RevealInExplorer(path)
+    } catch (e: any) {
+      notify('err', `定位失败：${String(e)}`)
+    }
+  }
+
   async function showGenThumb(path: string) {
     try {
       zoom = await api.PreviewGenerated(path, 900)
@@ -1622,7 +1631,7 @@
                   {/if}
                   <div class="cap">{baseName(f)}</div>
                   <button class="ghost thumb-locate" title="在资源管理器里定位这张图"
-                          on:click|stopPropagation={() => api.RevealInExplorer(f)}>定位</button>
+                          on:click|stopPropagation={() => revealFile(f)}>定位</button>
                 </div>
               {/each}
             </div>
