@@ -65,28 +65,32 @@ type Options struct {
 
 // Task 是一个「图案 × 模板」组合。
 type Task struct {
-	CompletionKey   string        `json:"-"`
-	FillTop         bool          `json:"fillTop,omitempty"`
-	ID              int           `json:"id"`
-	Pattern         string        `json:"pattern"`
-	OriginalPattern string        `json:"originalPattern,omitempty"`
-	OriginalSHA256  string        `json:"originalSha256,omitempty"`
-	PreparedSHA256  string        `json:"preparedSha256,omitempty"`
-	KeepWhole       bool          `json:"keepWhole,omitempty"`
-	PatternName     string        `json:"patternName"`
-	Template        string        `json:"template"`
-	TemplateName    string        `json:"templateName"`
-	Phase           Phase         `json:"phase"`
-	Progress        int           `json:"progress"` // 0-100
-	Message         string        `json:"message"`
-	OutputDir       string        `json:"outputDir"`
-	Files           []string      `json:"files"`
-	Error           string        `json:"error"`
-	ChosenScale     float64       `json:"chosenScale"`
-	JudgeNote       string        `json:"judgeNote"`
-	TuneRounds      int           `json:"tuneRounds"` // 实际迭代轮数
-	TuneHistory     []tuner.Round `json:"tuneHistory,omitempty"`
-	ElapsedMS       int64         `json:"elapsedMs"`
+	CanvasSHA256       string        `json:"canvasSha256,omitempty"`
+	CanvasPath         string        `json:"canvasPath,omitempty"`
+	StaticCells        []int         `json:"staticCells,omitempty"`
+	ReviewQuarterTurns map[int]int   `json:"reviewQuarterTurns,omitempty"`
+	CompletionKey      string        `json:"-"`
+	FillTop            bool          `json:"fillTop,omitempty"`
+	ID                 int           `json:"id"`
+	Pattern            string        `json:"pattern"`
+	OriginalPattern    string        `json:"originalPattern,omitempty"`
+	OriginalSHA256     string        `json:"originalSha256,omitempty"`
+	PreparedSHA256     string        `json:"preparedSha256,omitempty"`
+	KeepWhole          bool          `json:"keepWhole,omitempty"`
+	PatternName        string        `json:"patternName"`
+	Template           string        `json:"template"`
+	TemplateName       string        `json:"templateName"`
+	Phase              Phase         `json:"phase"`
+	Progress           int           `json:"progress"` // 0-100
+	Message            string        `json:"message"`
+	OutputDir          string        `json:"outputDir"`
+	Files              []string      `json:"files"`
+	Error              string        `json:"error"`
+	ChosenScale        float64       `json:"chosenScale"`
+	JudgeNote          string        `json:"judgeNote"`
+	TuneRounds         int           `json:"tuneRounds"` // 实际迭代轮数
+	TuneHistory        []tuner.Round `json:"tuneHistory,omitempty"`
+	ElapsedMS          int64         `json:"elapsedMs"`
 }
 
 // Event 是推给前端的事件。
@@ -112,7 +116,7 @@ type State string
 const (
 	StateIdle     State = "idle"     // 没有任务
 	StateRunning  State = "running"  // 正在逐组执行
-	StatePaused   State = "paused"   // 已请求暂停，停在组边界
+	StatePaused   State = "paused"   // 已请求暂停，停在操作边界
 	StateStopping State = "stopping" // 已请求停止，当前组做完就收尾
 )
 
@@ -157,6 +161,7 @@ type Engine struct {
 	// 调度行为单独测干净。
 	processFn func(*Engine, context.Context, Options, cfg.Config, judge.Config,
 		*Task, string, int, int)
+	groupFn func(*Engine, context.Context, Options, cfg.Config, judge.Config, []*Task, string, int, int)
 }
 
 // errStopped 是闸门放行后用来区分「用户停的」和「出错的」的哨兵错误。
@@ -167,6 +172,9 @@ func New(ps photoshop, store *cfg.Store, emit func(Event)) *Engine {
 	e := &Engine{ps: ps, store: store, emitFn: emit, state: StateIdle}
 	e.gcond = sync.NewCond(&e.gmu)
 	e.processFn = (*Engine).processOne
+	if ps != nil {
+		e.groupFn = (*Engine).processPattern
+	}
 	return e
 }
 
@@ -228,9 +236,8 @@ func (e *Engine) Cancel() { e.Stop() }
 
 // Pause 请求暂停。
 //
-// 语义是「当前这组做完就停」——渲染一组要几秒到几十秒，中途硬切会留下
-// 半套图产物和一堆没关的 PS 文档。所以这里只翻标志位，真正的等待发生在
-// run 循环下一轮的 gate()。
+// 已启动的渲染或模型请求自然返回，在下一渲染、评审或发布前等待。
+// 暂停保留当前公共画布和临时进度，继续时从同一处恢复。
 func (e *Engine) Pause() error {
 	e.mu.Lock()
 	st := e.state
@@ -259,14 +266,14 @@ func (e *Engine) Pause() error {
 	e.state = StatePaused
 	e.mu.Unlock()
 
-	e.logf("warn", "⏸ 已暂停：当前这组做完就停在组边界，随时可以继续")
+	e.logf("warn", "⏸ 已请求暂停：当前渲染或已发评审返回后停下，继续时保留当前进度")
 	return nil
 }
 
-// Stop 请求停止：当前这组做完就收尾，未执行的组标 canceled。
+// Stop 请求停止：已启动的操作返回后收尾，未完成的组标 canceled。
 //
 // 故意不复用 ctx 取消来「立刻掐断」渲染：PS COM 调用被打断后残留的文档
-// 会让下一次运行输出错图。ctx 只用来让后续的组别再启动。
+// 会让下一次运行输出错图。ctx 用来阻止后续操作启动。
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	if e.state == StateIdle {
@@ -288,13 +295,11 @@ func (e *Engine) Stop() {
 	if cancel != nil {
 		cancel()
 	}
-	e.logf("warn", "⏹ 正在停止：当前这组做完就收尾")
+	e.logf("warn", "⏹ 正在停止：当前渲染或已发评审返回后收尾")
 }
 
-// gate 是组边界的闸门：暂停时阻塞，停止或 ctx 结束时返回错误。
-//
-// 每个任务开始前调一次，所以暂停/停止的粒度是「一整组」，
-// 不会切在半成品状态上。
+// gate 是操作边界的闸门：暂停时阻塞，停止或 ctx 结束时返回错误。
+// 公共画布流程在轮次、模板渲染、评审启动及发布前复用此闸门。
 func (e *Engine) gate(ctx context.Context) error {
 	e.gmu.Lock()
 	for e.paused && !e.stop {
@@ -508,7 +513,26 @@ func (e *Engine) resumeFromQueue() error {
 	}
 
 	def := e.store.Get()
-	tasks := q.ToTasks()
+	tasks := RestoreQueueTasks(q, effectiveJobOptions(q.Options, def).OutputDir)
+	for _, t := range tasks {
+		if t.Phase == PhaseDone && (e.groupFn != nil || q.Options.NoCrop || t.KeepWhole) {
+			key, err := completionKey(q.Options, def, t)
+			if err != nil {
+				return fmt.Errorf("校验旧成品摆放: %w", err)
+			}
+			canvasValid := true
+			if e.groupFn != nil {
+				rec, err := completionRecordOf(t)
+				canvasValid = err == nil && rec.Canvas != nil && rec.valid()
+			}
+			if t.CompletionKey != key || !canvasValid {
+				t.Phase, t.Progress, t.Message = PhasePending, 0, "按七角统一位置重新校验"
+				t.Files, t.OutputDir, t.Error, t.JudgeNote = nil, "", "", ""
+				t.TuneHistory, t.TuneRounds, t.ChosenScale = nil, 0, 0
+				t.CanvasPath, t.CanvasSHA256, t.StaticCells = "", "", nil
+			}
+		}
+	}
 
 	// 恢复计数：已完成的组要算进 done，否则「完成 0/N」会让人以为全白跑了
 	done, failed := 0, 0
@@ -547,6 +571,9 @@ func (e *Engine) begin(opt Options, def cfg.Config, tasks []*Task, done, failed 
 	}
 	if strings.TrimSpace(opt.OutputDir) == "" {
 		opt.OutputDir = def.OutputDir
+	}
+	if err := validatePatternDestinations(tasks, opt.OutputDir); err != nil {
+		return err
 	}
 	if strings.TrimSpace(opt.OutputDir) == "" {
 		return fmt.Errorf("请先选择输出目录")
@@ -693,14 +720,15 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 	}
 
 	jc := judge.Config{
-		BaseURL:      settings.BaseURL,
-		APIKey:       settings.APIKey,
-		Model:        settings.Model,
-		MaxTokens:    settings.MaxTokens,
-		Timeout:      time.Duration(settings.TimeoutSec) * time.Second,
-		Temperature:  settings.Temperature,
-		ImageMaxSide: settings.ImageMaxSide,
-		Thinking:     settings.Thinking,
+		BaseURL:       settings.BaseURL,
+		APIKey:        settings.APIKey,
+		Model:         settings.Model,
+		MaxTokens:     settings.MaxTokens,
+		Timeout:       time.Duration(settings.TimeoutSec) * time.Second,
+		Temperature:   settings.Temperature,
+		ImageMaxSide:  settings.ImageMaxSide,
+		Thinking:      settings.Thinking,
+		BeforeRequest: func() error { return e.gate(ctx) },
 	}
 	tuneConfig := jc
 	if model := strings.TrimSpace(settings.TuneModel); model != "" {
@@ -730,8 +758,8 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 		}
 		// 继续跑时跳过已经有结论的组（done / skipped / failed）
 		if settledPhase(t.Phase) {
-			e.logf("dim", "  ⤼ 跳过已完成 [%d/%d]：%s × %s",
-				i+1, len(tasks), t.PatternName, t.TemplateName)
+			e.logf("dim", "  ⤼ 已处理 [%d/%d]（%s）：%s × %s",
+				i+1, len(tasks), t.Phase, t.PatternName, t.TemplateName)
 			continue
 		}
 		if err := e.validatePreparedTask(t); err != nil {
@@ -757,21 +785,64 @@ func (e *Engine) run(ctx context.Context, opt Options, settings cfg.Config, task
 			e.saveQueue(opt)
 			continue
 		}
-		e.processFn(e, ctx, opt, settings, tuneConfig, t, outRoot, i+1, len(tasks))
-		if err := e.recordCompletion(opt, settings, t); err != nil {
-			completionErr = err
-			e.updateTask(t, func(t *Task) {
-				t.Message += "（完成记录保存失败，请勿重新排队）"
-				t.Error = err.Error()
-			})
-			e.logf("error", "完成记录保存失败，停止后续任务：%v", err)
-			stopped = true
-			e.cancelRest(tasks[i+1:])
+		processed := []*Task{t}
+		if e.groupFn != nil {
+			processed = nil
+			for _, member := range tasks {
+				if samePattern(t, member) && member.Phase != PhaseSkipped {
+					processed = append(processed, member)
+				}
+			}
+			var groupErr error
+			for _, member := range processed {
+				if member != t {
+					e.mu.Lock()
+					if member.Phase == PhaseDone {
+						e.done--
+					}
+					if member.Phase == PhaseFailed {
+						e.failed--
+					}
+					e.mu.Unlock()
+					if err := e.validatePreparedTask(member); err != nil {
+						groupErr = err
+					}
+					key, err := completionKey(opt, settings, member)
+					if err != nil {
+						groupErr = err
+					}
+					e.updateTask(member, func(t *Task) { t.CompletionKey = key; t.Phase = PhasePending; t.FillTop = processed[0].FillTop })
+				}
+			}
 			e.saveQueue(opt)
-			break
+			if groupErr != nil {
+				for _, member := range processed {
+					e.failTask(member, groupErr)
+				}
+			} else {
+				e.groupFn(e, ctx, opt, settings, tuneConfig, processed, outRoot, i+1, len(tasks))
+			}
+		} else {
+			e.processFn(e, ctx, opt, settings, tuneConfig, t, outRoot, i+1, len(tasks))
+		}
+		for _, completed := range processed {
+			if err := e.recordCompletion(opt, settings, completed); err != nil {
+				completionErr = err
+				e.updateTask(completed, func(t *Task) {
+					t.Message += "（完成记录保存失败，请勿重新排队）"
+					t.Error = err.Error()
+				})
+				e.logf("error", "完成记录保存失败，停止后续任务：%v", err)
+				stopped = true
+				e.cancelRest(tasks[i+1:])
+				break
+			}
 		}
 		// 组结束后落盘：强杀恢复时能准确知道这组已完成
 		e.saveQueue(opt)
+		if stopped {
+			break
+		}
 	}
 }
 
@@ -885,6 +956,10 @@ func (e *Engine) precheckOne(ctx context.Context, def cfg.Config,
 	}
 
 	v := precheck.Inspect(jc, views)
+	if err := e.gate(ctx); err != nil {
+		e.cancelRest([]*Task{t})
+		return true
+	}
 	if v.Fallback {
 		if def.PrecheckSkip {
 			e.failTask(t, fmt.Errorf("预检未确认合格，未套图: %w", v.Err))
@@ -999,7 +1074,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	}
 	t0 := time.Now()
 	// 每组的临时目录：图案规范化产物与各档拼合图都放这里，结束即删
-	tmp, err := os.MkdirTemp("", "titao_")
+	tmp, err := os.MkdirTemp(filepath.Dir(outRoot), "titao_")
 	if err != nil {
 		e.failTask(t, fmt.Errorf("创建临时目录: %w", err))
 		return
@@ -1044,7 +1119,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		e.logf("dim", "  按原画布等比满铺，保留透明度与原构图，仅检查主要内容问题")
 	}
 	if opt.NoCrop {
-		e.logf("dim", "  按最终可见区域完整放入，保护所有有效内容，允许联合缩放与位移")
+		e.logf("dim", "  在统一印刷域内保护所有有效内容，允许联合缩放与位移")
 	}
 	// 2) 多轮参数微调
 	//    完整放下时先按原比例居中渲染，只在评审发现主要内容问题时重渲，
@@ -1099,6 +1174,8 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		bestCameraClear bool
 		bestNote        string
 		constraintNote  string
+		stopNote        string
+		stalledRecheck  bool
 		hist            []tuner.Round // 各轮评审记录，供界面展示
 	)
 
@@ -1234,9 +1311,15 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		chosenScale, offX, offY = actual.Scale, actual.OffsetX, actual.OffsetY
 		placement.AppliedSummary = placementSummary(meta, req, flatIdx[pick])
 		if sameRenderedPlacement(lastMeta, meta) {
-			chosenNote = "调整被可见边界或贴边约束限制，实际图案未变化，请人工复核"
-			e.logf("warn", "  实际摆放未改变，停止重复模型评审")
-			break
+			if reviewOn && !stalledRecheck && round < rounds {
+				stalledRecheck = true
+				placement.AppliedSummary += "上次建议已执行，但实际摆放未改变，位移被当前倍率的安全边界夹回。请根据本轮请求与实际回执重新计算，充分缩小后再移动；单独移动或仅微缩仍会被夹回。不要重复上次无效建议。"
+				e.logf("warn", "  实际摆放未改变，反馈边界限制后再评审一次")
+			} else {
+				stopNote = "调整被可见边界或贴边约束限制，实际图案未变化"
+				e.logf("warn", "  实际摆放未改变，停止重复模型评审")
+				break
+			}
 		}
 		lastMeta = meta
 
@@ -1276,6 +1359,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		views, err := imgutil.ReviewCellsJPEG(flatPick, opt.CellSize, def.ImageMaxSide, 90, extraCells...)
 		if err != nil {
 			e.logf("warn", "  评审图生成失败，结束微调: %v", err)
+			stopNote = "评审图生成失败"
 			hist = append(hist, cur)
 			break
 		}
@@ -1292,8 +1376,13 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			placement.DiagnosticFirstView = true
 		}
 		placement.Scale, placement.OffsetX, placement.OffsetY = chosenScale, offX, offY
+		placement.FrameVerified = meta != nil && meta.FrameVerified
+		placement.ViewPlacements = nil
+		if meta != nil && len(meta.Placements) == len(views) {
+			placement.ViewPlacements = meta.Placements
+		}
 		reviewStart := time.Now()
-		adv := tuner.Critique(tc, views[0], placement, views[1:]...)
+		adv := tuner.Critique(tc, views[0], placement)
 		e.logf("dim", "  第 %d 轮模型评审耗时 %.1fs", round, time.Since(reviewStart).Seconds())
 		if adv.Usage != nil && adv.Usage.CompletionTokens != nil {
 			if adv.Usage.CompletionDetails != nil && adv.Usage.CompletionDetails.ReasoningTokens != nil {
@@ -1316,6 +1405,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 
 		if adv.Fallback {
 			chosenNote = "评审未完成，请人工复核"
+			stopNote = "评审未完成"
 			e.logf("warn", "  评审模型调用失败，结束微调: %v", adv.Err)
 			break
 		}
@@ -1334,6 +1424,9 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		}
 		nextScale, nx, ny, iterate := tuner.Plan(adv, chosenScale, offX, offY)
 		if !iterate {
+			if !reviewGood {
+				stopNote = "复核后仍未给出可执行调整"
+			}
 			e.logf("info", "  第 %d 轮评审 %d 分：%s → 不再调整", round, adv.Score, adv.Problem)
 			break
 		}
@@ -1345,6 +1438,7 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 			nextScale = 1
 		}
 		if nextScale == chosenScale && nx == offX && ny == offY {
+			stopNote = "已到参数约束，无法继续调整"
 			e.logf("info", "  已到参数约束，结束无变化的重复渲染")
 			break
 		}
@@ -1358,6 +1452,9 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		flatPick = filepath.Join(tmp, "best.png")
 		chosenScale, chosenNote = bestScale, bestNote+"；保留较佳候选，请人工复核"
 		e.logf("warn", "  使用已评审较佳候选 x%.3f（%d 分），仍需人工复核", bestScale, bestScore)
+	}
+	if stopNote != "" {
+		chosenNote += "；" + stopNote + "，请人工复核"
 	}
 	// 5) 切格导出
 	e.updateTask(t, func(t *Task) {
@@ -1375,20 +1472,34 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 	}
 
 	elapsed := time.Since(t0)
+	passed := constraintNote == "" && (!reviewOn || reviewGood)
 	e.mu.Lock()
-	e.done++
+	if passed {
+		e.done++
+	} else {
+		e.failed++
+	}
 	e.mu.Unlock()
 
 	e.updateTask(t, func(t *Task) {
 		t.Phase = PhaseDone
 		t.Progress = 100
 		t.Message = fmt.Sprintf("生成 %d 张", len(files))
+		if !passed {
+			t.Phase = PhaseFailed
+			t.Error = chosenNote
+		}
 		if constraintNote != "" {
 			t.Message += "（约束冲突，请人工复核）"
 		} else if reviewOn && !reviewGood {
 			t.Message += "（评审未通过，请人工复核）"
 		}
 		t.Files = files
+		if lastMeta != nil {
+			t.CanvasSHA256 = lastMeta.CanvasSHA256
+			t.StaticCells = append([]int(nil), lastMeta.StaticCells...)
+			t.ReviewQuarterTurns = lastMeta.ReviewQuarterTurns
+		}
 		t.OutputDir = outDir
 		if chosenNote != "" {
 			t.JudgeNote = chosenNote
@@ -1398,7 +1509,11 @@ func (e *Engine) processOne(ctx context.Context, opt Options, def cfg.Config,
 		t.TuneHistory = hist
 		t.ElapsedMS = elapsed.Milliseconds()
 	})
-	e.logf("ok", "  ✓ %d 张 → %s（%.1fs）", len(files), outDir, elapsed.Seconds())
+	if passed {
+		e.logf("ok", "  ✓ %d 张 → %s（%.1fs）", len(files), outDir, elapsed.Seconds())
+	} else {
+		e.logf("warn", "  未通过，保留 %d 张预览 → %s（%.1fs）", len(files), outDir, elapsed.Seconds())
+	}
 }
 
 func (e *Engine) failTask(t *Task, err error) {

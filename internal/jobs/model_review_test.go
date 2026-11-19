@@ -2,6 +2,8 @@ package jobs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -19,6 +21,7 @@ import (
 
 	"titao/internal/cfg"
 	"titao/internal/judge"
+	"titao/internal/printcanvas"
 	"titao/internal/psx"
 	"titao/internal/tuner"
 )
@@ -29,6 +32,7 @@ type reviewPhotoshop struct {
 	anchorUnmet      bool
 	anchorImpossible bool
 	cells            int
+	clampFirstTwo    bool
 }
 
 func (p *reviewPhotoshop) CloseAllDocs() error { return nil }
@@ -58,9 +62,35 @@ func (p *reviewPhotoshop) Render(req psx.RenderRequest) (string, error) {
 		if closeErr != nil {
 			return "", closeErr
 		}
-		meta := psx.RenderMetadata{FrameVerified: true}
+		canvasPath := req.PrintCanvasPath(i)
+		if req.Canvas != nil {
+			if err := copyFile(req.Canvas.Path, canvasPath); err != nil {
+				return "", err
+			}
+		} else {
+			canvas := image.NewNRGBA(image.Rect(0, 0, printcanvas.Width, printcanvas.Height))
+			draw.Draw(canvas, canvas.Bounds(), image.NewUniform(color.NRGBA{R: 80, G: 100, B: 120, A: 255}), image.Point{}, draw.Src)
+			f, err := os.Create(canvasPath)
+			if err != nil {
+				return "", err
+			}
+			err = png.Encode(f, canvas)
+			f.Close()
+			if err != nil {
+				return "", err
+			}
+		}
+		cb, err := os.ReadFile(canvasPath)
+		if err != nil {
+			return "", err
+		}
+		ch := sha256.Sum256(cb)
+		meta := psx.RenderMetadata{FrameVerified: false, CanvasVerified: true, CanvasSHA256: hex.EncodeToString(ch[:]), CanvasWidth: printcanvas.Width, CanvasHeight: printcanvas.Height}
 		for cell := 0; cell < cells; cell++ {
 			meta.Placements = append(meta.Placements, psx.AppliedPlacement{Cell: cell, Scale: req.Scales[i], OffsetX: req.OffsetX, OffsetY: req.OffsetY, AnchorUnmet: cell == 0 && p.anchorUnmet, AnchorImpossible: cell == 0 && p.anchorImpossible})
+			if p.clampFirstTwo && len(p.requests) <= 2 {
+				meta.Placements[cell].Scale, meta.Placements[cell].OffsetX, meta.Placements[cell].OffsetY = 1, 0, 0
+			}
 		}
 		b, err := json.Marshal(meta)
 		if err != nil {
@@ -75,6 +105,58 @@ func (p *reviewPhotoshop) Render(req psx.RenderRequest) (string, error) {
 
 func TestModelReviewUsesActualScalesReferenceAndFinalRound(t *testing.T) {
 	checkModelReview(t, false)
+}
+
+func TestClampedAdjustmentGetsBoundedModelFeedback(t *testing.T) {
+	e, _, _ := newTestEngine(t)
+	ps := &reviewPhotoshop{clampFirstTwo: true}
+	e.ps = ps
+	dir := t.TempDir()
+	pattern, template := filepath.Join(dir, "pattern.png"), filepath.Join(dir, "template.tif")
+	im := image.NewRGBA(image.Rect(0, 0, 40, 90))
+	draw.Draw(im, im.Bounds().Inset(5), image.NewUniform(color.RGBA{R: 180, A: 255}), image.Point{}, draw.Src)
+	f, err := os.Create(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, im); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if err := os.WriteFile(template, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if calls == 2 {
+			b, _ := json.Marshal(body["messages"])
+			if !strings.Contains(string(b), "实际摆放未改变") {
+				t.Error("clamped request not explained to model")
+			}
+		}
+		reply := `{"good":false,"camera_clear":false,"score":50,"problem":"主脸被挡","dx":0,"dy":0.1,"scale_ratio":1}`
+		if calls == 2 {
+			reply = `{"good":false,"camera_clear":false,"score":50,"problem":"主脸被挡","dx":0,"dy":0.15,"scale_ratio":0.8}`
+		}
+		if calls >= 3 {
+			reply = `{"good":true,"camera_clear":true,"score":95,"problem":"无","dx":0,"dy":0,"scale_ratio":1}`
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": reply}}}})
+	}))
+	defer srv.Close()
+	task := &Task{ID: 1, Pattern: pattern, PatternName: "pattern", Template: template, TemplateName: "template"}
+	opt := Options{Scales: []float64{1}, Auto: true, NoCrop: true, Fit: "auto", CellSize: 80, JPGQuality: 90, MaxRounds: 3}
+	e.processOne(context.Background(), opt, cfg.Default(), judge.Config{BaseURL: srv.URL, Model: "fixture", MaxTokens: 160, Timeout: time.Second}, task, filepath.Join(dir, "out"), 1, 1)
+	// 同分不触发止损（50→50 继续跑），第 3 轮 95 分通过。
+	// 每轮只发 1 次评审，3 轮 = 3 次调用，不再有逐格复核。
+	if task.Phase != PhaseDone || calls != 3 || len(ps.requests) != 3 || task.ChosenScale != 0.8 || len(task.TuneHistory) != 3 {
+		t.Fatalf("stalled adjustment ended prematurely: calls=%d renders=%d task=%+v", calls, len(ps.requests), task)
+	}
 }
 
 func TestReviewFailurePreservesPreviousCandidate(t *testing.T) {
@@ -117,7 +199,7 @@ func checkModelReview(t *testing.T, finalFailure bool, anchorUnmet ...bool) {
 		}
 		requests = append(requests, body)
 		content := `{"good":false,"score":70,"problem":"主要内容偏位","direction":"right","step":0.1}`
-		if len(requests) == 2 {
+		if len(requests) >= 2 {
 			content = `{"good":true,"score":91,"problem":"无","direction":"none","step":0.05}`
 		}
 		if finalFailure && len(requests) >= 2 {
@@ -132,7 +214,11 @@ func checkModelReview(t *testing.T, finalFailure bool, anchorUnmet ...bool) {
 	opt := Options{Scales: cfg.DefaultCandidates(), Auto: true, NoCrop: true, Fit: "auto", CellSize: 80, JPGQuality: 90, OffsetX: 0.02, OffsetY: 0.01}
 	jc := judge.Config{BaseURL: srv.URL, APIKey: "test", Model: "test", MaxTokens: 100, Timeout: time.Second}
 	e.processOne(context.Background(), opt, def, jc, task, filepath.Join(dir, "out"), 1, 1)
-	if task.Phase != PhaseDone {
+	wantPhase := PhaseDone
+	if finalFailure || ps.anchorUnmet {
+		wantPhase = PhaseFailed
+	}
+	if task.Phase != wantPhase {
 		t.Fatalf("task = %+v", task)
 	}
 	if len(ps.requests) != 2 {
@@ -146,12 +232,17 @@ func checkModelReview(t *testing.T, finalFailure bool, anchorUnmet ...bool) {
 	if task.ChosenScale != wantScale {
 		t.Errorf("chosen scale = %v; want %v", task.ChosenScale, wantScale)
 	}
+	// 每轮一次评审、每轮只送一张图：MaxRounds=2 时最多 2 次；
+	// 首轮合格则 1 次。不再有逐格复核带来的额外调用。
+	// MaxRounds=2：每轮 1 次评审，最多 2 次
+	// 正常路径：每轮 1 次，2 轮 = 2 次。
+	// 失败路径：第 2 轮返回无效内容会触发一次格式重试，共 3 次。
 	wantCalls := 2
 	if finalFailure {
 		wantCalls = 3
 	}
 	if len(requests) != wantCalls {
-		t.Fatalf("model calls = %d; final render must also be reviewed", len(requests))
+		t.Fatalf("model calls = %d; want %d（每轮一张，失败时含一次格式重试）", len(requests), wantCalls)
 	}
 	for i, body := range requests {
 		var content []any
@@ -181,7 +272,10 @@ func checkModelReview(t *testing.T, finalFailure bool, anchorUnmet ...bool) {
 		if !strings.Contains(text, wantOffset) || !strings.Contains(text, "offset_y=0") || strings.Contains(text, "scale=0.000") {
 			t.Errorf("request %d has incorrect actual parameters", i)
 		}
-		wantImages := 3 // 原图 + 两个独立成品角度。
+		wantImages := 2 // 原图参考 + 本轮成品（每轮只审一张）
+		if i >= 2 && !finalFailure {
+			wantImages = 2
+		}
 		images := 0
 		for _, c := range content {
 			if c.(map[string]any)["type"] == "image_url" {
@@ -258,7 +352,7 @@ func TestFallbackPrefersClearTextOverHigherOverallScore(t *testing.T) {
 	opt := Options{Scales: []float64{1}, Auto: true, NoCrop: true, Fit: "auto", CellSize: 80, JPGQuality: 90}
 	task := &Task{ID: 1, Pattern: pattern, PatternName: "pattern", Template: template, TemplateName: "template"}
 	e.processOne(context.Background(), opt, def, judge.Config{BaseURL: srv.URL, APIKey: "test", Model: "test", MaxTokens: 160, Timeout: time.Second}, task, filepath.Join(dir, "out"), 1, 1)
-	if task.Phase != PhaseDone || task.ChosenScale != .95 || !strings.Contains(task.JudgeNote, "70") || !strings.Contains(task.Message, "人工复核") {
+	if task.Phase != PhaseFailed || task.ChosenScale != .95 || !strings.Contains(task.JudgeNote, "70") || !strings.Contains(task.Message, "人工复核") || len(task.Files) != 2 || e.done != 0 || e.failed != 1 {
 		t.Fatalf("clear candidate was discarded for a higher total score: %+v", task)
 	}
 }
@@ -299,14 +393,16 @@ func TestImpossibleAnchorsStopBeforeModelReview(t *testing.T) {
 			opt := Options{Scales: tc.scales, Auto: tc.auto, NoCrop: true, Fit: tc.fit, CellSize: 80, JPGQuality: 90}
 			task := &Task{ID: 1, Pattern: pattern, PatternName: "pattern", Template: template, TemplateName: "template"}
 			e.processOne(context.Background(), opt, cfg.Default(), judge.Config{BaseURL: srv.URL, APIKey: "test", Model: "test", MaxTokens: 100, Timeout: time.Second}, task, filepath.Join(dir, "out"), 1, 1)
-			if calls != 0 || len(editor.requests) != 1 || task.Phase != PhaseDone || !strings.Contains(task.Message, "人工复核") || !strings.Contains(task.JudgeNote, "约束冲突") || len(task.TuneHistory) != 1 || task.TuneHistory[0].Score != 0 {
+			if calls != 0 || len(editor.requests) != 1 || task.Phase != PhaseFailed || !strings.Contains(task.Message, "人工复核") || !strings.Contains(task.JudgeNote, "约束冲突") || len(task.TuneHistory) != 1 || task.TuneHistory[0].Score != 0 {
 				t.Fatalf("impossible constraint retried or passed: calls=%d task=%+v", calls, task)
 			}
 		})
 	}
 }
 
-func TestStrictReviewReceivesAllSevenAngles(t *testing.T) {
+// 每轮只把一张最能代表全组的正面图送审，不再 7 格逐一发送：
+// 全组共用同一套摆放参数，逐格送等于把同一个问题问 7 遍。
+func TestStrictReviewSendsOneRepresentativeView(t *testing.T) {
 	e, _, _ := newTestEngine(t)
 	e.ps = &reviewPhotoshop{cells: 7}
 	dir := t.TempDir()
@@ -357,7 +453,8 @@ func TestStrictReviewReceivesAllSevenAngles(t *testing.T) {
 	opt := Options{Scales: []float64{1}, Auto: true, NoCrop: true, Fit: "auto", CellSize: 80, JPGQuality: 90, MaxRounds: 1}
 	task := &Task{ID: 1, Pattern: pattern, PatternName: "pattern", Template: template, TemplateName: "template"}
 	e.processOne(context.Background(), opt, cfg.Default(), judge.Config{BaseURL: srv.URL, APIKey: "test", Model: "test", MaxTokens: 100, Timeout: time.Second}, task, filepath.Join(dir, "out"), 1, 1)
-	if task.Phase != PhaseDone || images != 8 {
-		t.Fatalf("review images=%d want original+7; task=%+v", images, task)
+	// 原图参考 1 张 + 成品 1 张 = 2 张，一整天只有这一种组合
+	if task.Phase != PhaseDone || images != 2 {
+		t.Fatalf("review images=%d want 2（原图 + 单张成品）; task=%+v", images, task)
 	}
 }

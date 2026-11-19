@@ -23,11 +23,25 @@ type VisibleArea struct {
 // Constrained reports adjusted requests or anchors that cannot meet both edges.
 type AppliedPlacement struct {
 	Scale, OffsetX, OffsetY float64
-	Cell                    int
-	Constrained             bool
-	AnchorUnmet             bool
+	// StretchY is vertical scale relative to horizontal; zero preserves legacy 1:1.
+	StretchY    float64 `json:"stretch_y,omitempty"`
+	Cell        int
+	Constrained bool
+	AnchorUnmet bool
 	// AnchorImpossible certifies no common scale/translation for a paired anchor.
 	AnchorImpossible bool
+}
+
+func (p AppliedPlacement) VerticalStretch() float64 {
+	if p.StretchY == 0 {
+		return 1
+	}
+	return p.StretchY
+}
+
+func (p AppliedPlacement) ValidStretch() bool {
+	ratio := p.VerticalStretch()
+	return geometryFinite(ratio) && ratio >= .97 && ratio <= 1.03
 }
 
 // CalibrateVisibleAreas decodes R=u*255, G=v*255, B=128 opaque UV exports.
@@ -199,7 +213,55 @@ func ArtworkHull(im image.Image) []Point {
 // when no translation fits does it find the largest smaller uniform scale.
 // Anchors are -1 for left/top, +1 for right/bottom, 2 for both edges, 0 for none.
 // preferOffsets=true instead keeps requested XY by shrinking when unanchored.
+func FitArtworkAcrossViews(areas []VisibleArea, hull []Point, cw, ch, pw, ph int, desiredScale, offsetX, offsetY float64, anchorX, anchorY int, preferOffsets bool) (AppliedPlacement, error) {
+	if len(areas) == 0 {
+		return AppliedPlacement{}, fmt.Errorf("no calibrated angles")
+	}
+	common := areas[0]
+	common.Polygon = []Point{{0, 0}, {1, 0}, {1, 1}, {0, 1}}
+	for _, area := range areas {
+		poly := append([]Point(nil), area.Polygon...)
+		if len(poly) < 3 || !geometryFinite(area.EdgeTolerance) || area.EdgeTolerance < 0 {
+			return AppliedPlacement{}, fmt.Errorf("invalid calibrated angle")
+		}
+		for _, p := range poly {
+			if !geometryFinite(p[0]) || !geometryFinite(p[1]) || p[0] < 0 || p[0] > 1 || p[1] < 0 || p[1] > 1 {
+				return AppliedPlacement{}, fmt.Errorf("invalid calibrated polygon")
+			}
+		}
+		if geometrySignedArea(poly) < 0 {
+			for i, j := 0, len(poly)-1; i < j; i, j = i+1, j-1 {
+				poly[i], poly[j] = poly[j], poly[i]
+			}
+		}
+		if geometrySignedArea(poly) < 1e-12 {
+			return AppliedPlacement{}, fmt.Errorf("degenerate calibrated polygon")
+		}
+		for i, a := range poly {
+			b := poly[(i+1)%len(poly)]
+			if math.Hypot(b[0]-a[0], b[1]-a[1]) < 1e-12 {
+				return AppliedPlacement{}, fmt.Errorf("duplicate calibrated vertex")
+			}
+			for _, p := range poly {
+				if geometryCross(a, b, p) < -1e-10 {
+					return AppliedPlacement{}, fmt.Errorf("nonconvex calibrated polygon")
+				}
+			}
+		}
+		for _, plane := range geometryPlanes(poly) {
+			common.Polygon = geometryClip(common.Polygon, plane[0], plane[1], plane[2])
+		}
+		common.EdgeTolerance = math.Max(common.EdgeTolerance, area.EdgeTolerance)
+	}
+	common.Polygon = geometryHull(common.Polygon)
+	return fitArtwork(common, hull, cw, ch, pw, ph, desiredScale, offsetX, offsetY, anchorX, anchorY, preferOffsets, areas)
+}
+
 func FitArtwork(area VisibleArea, hull []Point, cw, ch, pw, ph int, desiredScale, offsetX, offsetY float64, anchorX, anchorY int, preferOffsets ...bool) (AppliedPlacement, error) {
+	return fitArtwork(area, hull, cw, ch, pw, ph, desiredScale, offsetX, offsetY, anchorX, anchorY, len(preferOffsets) > 0 && preferOffsets[0], []VisibleArea{area})
+}
+
+func fitArtwork(area VisibleArea, hull []Point, cw, ch, pw, ph int, desiredScale, offsetX, offsetY float64, anchorX, anchorY int, preferOffsets bool, anchorAreas []VisibleArea) (AppliedPlacement, error) {
 	result := AppliedPlacement{Cell: area.Cell}
 	if cw <= 0 || ch <= 0 || pw <= 0 || ph <= 0 || !geometryFinite(desiredScale) || desiredScale <= 0 || !geometryFinite(offsetX) || !geometryFinite(offsetY) || anchorX < -1 || anchorX > 2 || anchorY < -1 || anchorY > 2 || !geometryFinite(area.EdgeTolerance) || area.EdgeTolerance < 0 {
 		return result, fmt.Errorf("invalid placement dimensions, scale, offsets, anchors or edge tolerance")
@@ -245,13 +307,20 @@ func FitArtwork(area VisibleArea, hull []Point, cw, ch, pw, ph int, desiredScale
 	ratios := Point{rx, ry}
 	spanLimit := math.Min((pmax[0]-pmin[0])/((hmax[0]-hmin[0])*rx), (pmax[1]-pmin[1])/((hmax[1]-hmin[1])*ry))
 	requiredMinimum := 0.0
-	for axis, anchor := range []int{anchorX, anchorY} {
-		if anchor == 2 {
-			requiredMinimum = math.Max(requiredMinimum, (pmax[axis]-pmin[axis]-2*visualTolerance)/((hmax[axis]-hmin[axis])*ratios[axis]))
+	pairedMaximum := math.Inf(1)
+	for _, anchorArea := range anchorAreas {
+		amin, amax := geometryBounds(anchorArea.Polygon)
+		band := math.Max(anchorTolerance, anchorArea.EdgeTolerance)
+		for axis, anchor := range []int{anchorX, anchorY} {
+			if anchor == 2 {
+				span := (hmax[axis] - hmin[axis]) * ratios[axis]
+				requiredMinimum = math.Max(requiredMinimum, (amax[axis]-amin[axis]-2*band)/span)
+				pairedMaximum = math.Min(pairedMaximum, (amax[axis]-amin[axis]+2*band)/span)
+			}
 		}
 	}
 	requestedScale := desiredScale
-	floorRaised := len(preferOffsets) > 0 && preferOffsets[0] && requiredMinimum > desiredScale
+	floorRaised := preferOffsets && requiredMinimum > desiredScale
 	if floorRaised {
 		// Later proposals retain the paired span, while hard NoCrop still wins.
 		desiredScale = math.Nextafter(requiredMinimum, math.Inf(1))
@@ -294,7 +363,7 @@ func FitArtwork(area VisibleArea, hull []Point, cw, ch, pw, ph int, desiredScale
 	}
 	scale := desiredScale
 	legal := feasible(scale, 0)
-	if len(preferOffsets) > 0 && preferOffsets[0] && anchorX == 0 && anchorY == 0 {
+	if preferOffsets && anchorX == 0 && anchorY == 0 {
 		lower, upper := 0.0, desiredScale
 		possible := true
 		for _, plane := range planes {
@@ -335,20 +404,27 @@ func FitArtwork(area VisibleArea, hull []Point, cw, ch, pw, ph int, desiredScale
 		}
 	}
 	anchorDomain := func(domain []Point, scale, tolerance float64) []Point {
-		for axis, anchor := range []int{anchorX, anchorY} {
-			for side, edge := range []float64{pmin[axis], pmax[axis]} {
-				if anchor != 2 && !((anchor == -1 && side == 0) || (anchor == 1 && side == 1)) {
-					continue
+		for _, anchorArea := range anchorAreas {
+			pmin, pmax := geometryBounds(anchorArea.Polygon)
+			band := tolerance
+			if tolerance > anchorTolerance {
+				band = math.Max(anchorTolerance, anchorArea.EdgeTolerance)
+			}
+			for axis, anchor := range []int{anchorX, anchorY} {
+				for side, edge := range []float64{pmin[axis], pmax[axis]} {
+					if anchor != 2 && !((anchor == -1 && side == 0) || (anchor == 1 && side == 1)) {
+						continue
+					}
+					content := hmin[axis]
+					if side == 1 {
+						content = hmax[axis]
+					}
+					offset := edge - .5 - (content-.5)*ratios[axis]*scale
+					normal := Point{}
+					normal[axis] = 1
+					domain = geometryClip(domain, normal[0], normal[1], offset+band)
+					domain = geometryClip(domain, -normal[0], -normal[1], -offset+band)
 				}
-				content := hmin[axis]
-				if side == 1 {
-					content = hmax[axis]
-				}
-				offset := edge - .5 - (content-.5)*ratios[axis]*scale
-				normal := Point{}
-				normal[axis] = 1
-				domain = geometryClip(domain, normal[0], normal[1], offset+tolerance)
-				domain = geometryClip(domain, -normal[0], -normal[1], -offset+tolerance)
 			}
 		}
 		return domain
@@ -421,6 +497,7 @@ func FitArtwork(area VisibleArea, hull []Point, cw, ch, pw, ph int, desiredScale
 			trial := anchorDomain(feasible(candidate, anchorTolerance), candidate, anchorTolerance)
 			anchorImpossible = len(trial) == 0
 		}
+		anchorImpossible = anchorImpossible || requiredMinimum-pairedMaximum > 1e-12*math.Max(1, requiredMinimum)
 	}
 	return AppliedPlacement{Scale: scale, OffsetX: chosen[0], OffsetY: chosen[1], Cell: area.Cell, Constrained: constrained, AnchorUnmet: anchorUnmet, AnchorImpossible: anchorImpossible}, nil
 }

@@ -29,6 +29,18 @@ func TestStrictPhotoCraftStillInitializes(t *testing.T) {
 	}
 }
 
+func TestStrictFrozenPhotoshopInitializes(t *testing.T) {
+	for _, renderer := range []string{"", "photoshop"} {
+		opens := 0
+		inner := &stubEditor{}
+		l := &lazyEditor{renderer: renderer, open: func() (editorSession, string, error) { opens++; return inner, "Photoshop", nil }}
+		defer l.Close()
+		if _, err := l.Render(psx.RenderRequest{NoCrop: true, Canvas: &psx.PrintCanvas{Verified: true}}); err != nil || opens != 1 || inner.renders != 1 {
+			t.Fatalf("frozen Photoshop path: opens=%d renders=%d err=%v", opens, inner.renders, err)
+		}
+	}
+}
+
 type stubEditor struct{ renders, closes int }
 
 func (s *stubEditor) Probe() (string, error) { return "test-version", nil }

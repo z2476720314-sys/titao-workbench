@@ -15,16 +15,30 @@ import (
 
 // DoVisionRequest completes a bounded reply before decoding, retrying transient failures once.
 // It is used for read-only visual judgments, never image generation.
-func DoVisionRequest(req *http.Request, timeout time.Duration) (*http.Response, error) {
+func DoVisionRequest(req *http.Request, timeout time.Duration, beforeRequest ...func() error) (*http.Response, error) {
 	ctx := req.Context()
-	if timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	req = req.Clone(ctx)
+	remaining := timeout
 	client := &http.Client{Transport: visionTransport()}
 	for attempt := 0; ; attempt++ {
+		if len(beforeRequest) > 0 && beforeRequest[0] != nil {
+			if err := beforeRequest[0](); err != nil {
+				if req.Body != nil {
+					req.Body.Close()
+				}
+				return nil, err
+			}
+		}
+		requestCtx := ctx
+		if timeout > 0 {
+			if remaining <= 0 {
+				return nil, context.DeadlineExceeded
+			}
+			var cancel context.CancelFunc
+			requestCtx, cancel = context.WithTimeout(ctx, remaining)
+			defer cancel()
+		}
+		req = req.Clone(requestCtx)
+		started := time.Now()
 		resp, err := client.Do(req)
 		if err == nil {
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
@@ -53,6 +67,7 @@ func DoVisionRequest(req *http.Request, timeout time.Duration) (*http.Response, 
 				resp.Body = io.NopCloser(bytes.NewReader(data))
 			}
 		}
+		remaining -= time.Since(started)
 		var networkError net.Error
 		retry := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 		retry = retry || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED)
@@ -66,7 +81,7 @@ func DoVisionRequest(req *http.Request, timeout time.Duration) (*http.Response, 
 				retry = true
 			}
 		}
-		if attempt == 1 || !retry || req.GetBody == nil || ctx.Err() != nil {
+		if attempt == 1 || !retry || req.GetBody == nil || requestCtx.Err() != nil {
 			if err != nil {
 				if resp != nil {
 					resp.Body.Close()
@@ -86,13 +101,15 @@ func DoVisionRequest(req *http.Request, timeout time.Duration) (*http.Response, 
 			resp.Body.Close()
 		}
 		timer := time.NewTimer(250 * time.Millisecond)
+		started = time.Now()
 		select {
-		case <-ctx.Done():
+		case <-requestCtx.Done():
 			timer.Stop()
 			body.Close()
-			return nil, ctx.Err()
+			return nil, requestCtx.Err()
 		case <-timer.C:
 		}
+		remaining -= time.Since(started)
 		req = req.Clone(ctx)
 		req.Body = body
 	}

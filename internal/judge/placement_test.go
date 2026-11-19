@@ -28,3 +28,21 @@ func TestDiagnosticFirstAngleIsGeometryOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewComparesClippingAgainstExistingSourceContour(t *testing.T) {
+	text := (Placement{NoCrop: true}).Description()
+	for _, want := range []string{"原图已有的平直截断轮廓", "只判断成品新增的裁切或镜头遮挡", "不得推想原图不存在的头顶"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing source-boundary interpretation %q", want)
+		}
+	}
+}
+
+func TestAnchoredSourceCutsAreNotReportedAsCameraOcclusion(t *testing.T) {
+	text := (Placement{NoCrop: true, AnchorX: 2}).Description()
+	for _, want := range []string{"原图左右边缘本来截开的文字", "同样的半个字", "摄像头实际覆盖原图已有笔画"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing original-edge evidence rule %q", want)
+		}
+	}
+}

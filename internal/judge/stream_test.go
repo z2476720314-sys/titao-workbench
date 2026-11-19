@@ -15,8 +15,19 @@ import (
 func TestTerraUsesNativeReasoningAndTokenParameters(t *testing.T) {
 	body := map[string]any{"max_tokens": 4000, "temperature": .7}
 	ApplyThinking(body, "gpt-6.1-terra", false)
-	if body["reasoning_effort"] != "none" || body["max_completion_tokens"] != 4000 || body["max_tokens"] != nil || body["enable_thinking"] != nil {
+	// 实测：gpt-6.1-terra 写 reasoning_effort=none 会被上游回 503，
+	// 必须是 low，否则整轮评审变成「未完成」。
+	if body["reasoning_effort"] != "low" || body["max_completion_tokens"] != 4000 || body["max_tokens"] != nil || body["enable_thinking"] != nil {
 		t.Fatalf("incorrect Terra parameters: %v", body)
+	}
+}
+
+func TestLunaKeepsNativeNoneCostingReasoning(t *testing.T) {
+	body := map[string]any{"max_tokens": 4000}
+	ApplyThinking(body, "gpt-6-luna", false)
+	// gpt-6-luna 接受 none，不要为了统一写成 low 而白烧 token。
+	if body["reasoning_effort"] != "none" {
+		t.Fatalf("incorrect Luna parameters: %v", body)
 	}
 }
 

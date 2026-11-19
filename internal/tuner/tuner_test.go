@@ -257,8 +257,8 @@ func TestPlanAtBoundaryStops(t *testing.T) {
 }
 
 func TestClampScale(t *testing.T) {
-	if v := clampScale(0.1); v != 0.3 {
-		t.Errorf("下限应为 0.3，实际 %v", v)
+	if v := clampScale(0.1); v != minScale {
+		t.Errorf("下限应为 %v，实际 %v", minScale, v)
 	}
 	if v := clampScale(5); v != 2.0 {
 		t.Errorf("上限应为 2.0，实际 %v", v)

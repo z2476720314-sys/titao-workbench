@@ -25,6 +25,39 @@ func TestArtworkHullIncludesFaintPixelOuterCorners(t *testing.T) {
 	}
 }
 
+func TestSharedPlacementFitsEveryAngleWithoutChangingPrintPosition(t *testing.T) {
+	areas := []VisibleArea{
+		{Cell: 0, Polygon: []Point{{.1, .1}, {.9, .1}, {.9, .95}, {.1, .95}}},
+		{Cell: 1, Polygon: []Point{{.2, .05}, {.8, .05}, {.8, .8}, {.2, .8}}},
+	}
+	hull := []Point{{.2, .2}, {.8, .2}, {.8, .8}, {.2, .8}}
+	p, err := FitArtworkAcrossViews(areas, hull, 100, 200, 100, 200, 1, .2, .2, 0, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(p.Scale-1) > 1e-9 || math.Abs(p.OffsetX) > 1e-7 || math.Abs(p.OffsetY) > 1e-7 {
+		t.Fatalf("expected one shared position (1,0,0), got %+v", p)
+	}
+	for _, a := range areas {
+		geometryTestPlacement(t, a, hull, p, 100, 200, 100, 200)
+	}
+}
+
+func TestSharedPlacementCannotUseIntersectionEdgesAsEachShellEdge(t *testing.T) {
+	areas := []VisibleArea{
+		{Cell: 0, Polygon: []Point{{.1, .1}, {.9, .1}, {.9, .9}, {.1, .9}}},
+		{Cell: 1, Polygon: []Point{{.2, .1}, {.8, .1}, {.8, .9}, {.2, .9}}},
+	}
+	hull := []Point{{0, 0}, {1, 0}, {1, 1}, {0, 1}}
+	p, err := FitArtworkAcrossViews(areas, hull, 100, 100, 100, 100, 1, 0, 0, 2, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.AnchorUnmet || !p.AnchorImpossible {
+		t.Fatalf("different shell edge bands were silently redefined: %+v", p)
+	}
+}
+
 func TestFitArtworkKeepsRequestedPlacementWhenSafe(t *testing.T) {
 	a := VisibleArea{Polygon: []Point{{0, 0}, {1, 0}, {1, 1}, {0, 1}}, Cell: 3}
 	h := []Point{{.3, .2}, {.7, .2}, {.7, .8}, {.3, .8}}

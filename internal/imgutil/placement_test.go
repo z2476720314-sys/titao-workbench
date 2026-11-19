@@ -76,6 +76,17 @@ func TestCutEdgeAnchorsIgnoreNaturalContours(t *testing.T) {
 	}
 }
 
+func TestCutEdgeAnchorsKeepBothShortStraightSides(t *testing.T) {
+	im := image.NewNRGBA(image.Rect(0, 0, 100, 200))
+	im.SetNRGBA(50, 0, color.NRGBA{A: 8})
+	im.SetNRGBA(50, 199, color.NRGBA{A: 8})
+	draw.Draw(im, image.Rect(0, 65, 25, 100), image.NewUniform(color.NRGBA{R: 200, A: 255}), image.Point{}, draw.Src)
+	draw.Draw(im, image.Rect(75, 120, 100, 165), image.NewUniform(color.NRGBA{R: 200, A: 255}), image.Point{}, draw.Src)
+	if x, y := cutEdgeAnchors(im); x != 2 || y != 0 {
+		t.Fatalf("partial straight side was lost against the full canvas: %d,%d", x, y)
+	}
+}
+
 func TestCutEdgeAnchorsTolerateSparsePixelsBeforeStraightEdges(t *testing.T) {
 	im := image.NewNRGBA(image.Rect(0, 0, 945, 1456))
 	draw.Draw(im, image.Rect(5, 5, 938, 1450), image.NewUniform(color.NRGBA{R: 180, A: 255}), image.Point{}, draw.Src)

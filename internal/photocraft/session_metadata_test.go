@@ -1,8 +1,11 @@
 package photocraft
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"image"
+	"image/color"
 	"image/png"
 	"io"
 	"math"
@@ -47,6 +50,17 @@ func serveLegacyMCPFixture() int {
 		if req.Method == "tools/call" {
 			var value any = map[string]any{}
 			a := req.Params.Arguments
+			if path := os.Getenv("PHOTOCRAFT_FIXTURE_CALLS"); path != "" {
+				f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+				if err != nil {
+					return 7
+				}
+				err = json.NewEncoder(f).Encode(map[string]any{"Name": req.Params.Name, "Arguments": a})
+				f.Close()
+				if err != nil {
+					return 8
+				}
+			}
 			switch req.Params.Name {
 			case "command_run":
 				if a["id"] == "layer.smartObjects.editContents" {
@@ -54,11 +68,18 @@ func serveLegacyMCPFixture() int {
 				}
 			case "doc_inspect":
 				if inner != 0 {
-					width := 100
+					width, height := 945, 1890
 					if inner == 11 {
-						width = 200
+						switch os.Getenv("PHOTOCRAFT_FIXTURE_MAPPING") {
+						case "white":
+							width = 946
+						case "scaled":
+							width, height = 1890, 3780
+						case "invalid":
+							width = 1000
+						}
 					}
-					value = document{Width: width, Height: 200}
+					value = document{Width: width, Height: height}
 				} else {
 					value = document{Width: 100, Height: 300, Layers: []layer{{Name: "插画", Kind: "Group", Visible: true, Children: []layer{
 						{ID: 10, Kind: "Smart Object", Visible: true, SmartContents: &contents{ID: 7}, Bounds: []float64{0, 0, 100, 100}},
@@ -73,6 +94,12 @@ func serveLegacyMCPFixture() int {
 			case "doc_place":
 				value = map[string]int{"layer": 20}
 			case "doc_save":
+				if filepath.Ext(a["path"].(string)) == ".pcraft" {
+					if err := saveOrientationFixture(a["path"].(string)); err != nil {
+						return 9
+					}
+					break
+				}
 				f, err := os.Create(a["path"].(string))
 				if err != nil {
 					return 3
@@ -95,17 +122,20 @@ func serveLegacyMCPFixture() int {
 	}
 }
 
-func TestLegacyRenderReportsClampedPerCellPlacementForSharedContents(t *testing.T) {
+func TestStandaloneRenderBuildsCanonicalCandidatesAndReportsActualPlacement(t *testing.T) {
 	t.Setenv("PHOTOCRAFT_LEGACY_MCP_FIXTURE", "1")
 	dir := t.TempDir()
 	pattern := filepath.Join(dir, "pattern.png")
-	f, err := os.Create(pattern)
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "fixture.tif"), []byte("fixture"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	err = png.Encode(f, image.NewNRGBA(image.Rect(0, 0, 100, 200)))
-	f.Close()
-	if err != nil {
+	im := image.NewNRGBA(image.Rect(0, 0, 100, 200))
+	for y := 0; y < 200; y++ {
+		for x := 0; x < 100; x++ {
+			im.SetNRGBA(x, y, color.NRGBA{80, 120, 160, 255})
+		}
+	}
+	if err := savePNG(pattern, im); err != nil {
 		t.Fatal(err)
 	}
 	req := psx.RenderRequest{TemplateCopy: filepath.Join(dir, "fixture.tif"), Pattern: pattern, Group: "插画", Fit: psx.FitCover, Scales: []float64{1, 1.2}, OffsetX: .3, OffsetY: .2, OutDir: dir, CellSize: 100}
@@ -119,11 +149,11 @@ func TestLegacyRenderReportsClampedPerCellPlacementForSharedContents(t *testing.
 	started, exited := 0, 0
 	for _, line := range strings.Split(strings.TrimSpace(string(processLog)), "\n") {
 		var event struct {
-			Event string `json:"event"`
-			PID   int    `json:"pid"`
+			Event string
+			PID   int
 		}
 		if err := json.Unmarshal([]byte(line), &event); err != nil || event.PID <= 0 {
-			t.Fatal("private fixture process identity was not recorded")
+			t.Fatal("process identity not recorded")
 		}
 		if event.Event == "started" {
 			started = event.PID
@@ -132,90 +162,32 @@ func TestLegacyRenderReportsClampedPerCellPlacementForSharedContents(t *testing.
 			exited = event.PID
 		}
 	}
-	if started == 0 || exited != started {
-		t.Fatal("private MCP fixture did not exit before Render returned")
+	if started == 0 || started != exited {
+		t.Fatal("private MCP did not exit before Render returned")
 	}
 	for index, wantOffset := range []float64{0, .1} {
 		data, err := os.ReadFile(req.MetadataPath(index))
 		if err != nil {
-			t.Fatal("legacy rendering must write actual placement metadata: ", err)
+			t.Fatal(err)
 		}
 		var metadata psx.RenderMetadata
 		if err := json.Unmarshal(data, &metadata); err != nil {
 			t.Fatal(err)
 		}
-		if metadata.FrameVerified || len(metadata.Placements) != 3 {
-			t.Fatalf("legacy shared sources need three unverified cell records: %+v", metadata)
+		if metadata.FrameVerified || len(metadata.Placements) != 3 || metadata.CanvasSHA256 == "" || metadata.CanvasWidth != 945 || metadata.CanvasHeight != 1890 {
+			t.Fatalf("metadata=%+v", metadata)
 		}
-		seen := map[int]psx.AppliedPlacement{}
-		for _, p := range metadata.Placements {
-			seen[p.Cell] = p
-		}
-		for _, cell := range []int{0, 2} {
-			p, ok := seen[cell]
-			if !ok || math.Abs(p.Scale-req.Scales[index]) > 1e-12 || math.Abs(p.OffsetX-wantOffset) > 1e-12 || math.Abs(p.OffsetY-wantOffset) > 1e-12 {
-				t.Fatalf("shared cell %d reports requested instead of clamped placement: %+v", cell, p)
+		for cell, p := range metadata.Placements {
+			if p.Cell != cell || p.Scale != req.Scales[index] || math.Abs(p.OffsetX-wantOffset) > 1e-12 || math.Abs(p.OffsetY-wantOffset) > 1e-12 {
+				t.Fatalf("shared cell lost actual canonical placement: %+v", p)
 			}
 		}
-		if p, ok := seen[1]; !ok || math.Abs(p.OffsetX-wantOffset) > 1e-12 || math.Abs(p.OffsetY-.2) > 1e-12 {
-			t.Fatalf("independent cell lost its different actual placement: %+v", p)
-		}
-	}
-}
-
-func TestLegacyPlacementUsesSelectedFitBasisAndReportsAnchorScale(t *testing.T) {
-	for _, fit := range []string{psx.FitAuto, psx.FitContain, psx.FitCover, psx.FitNone, psx.FitStretch} {
-		req := psx.RenderRequest{Fit: fit}
-		sx, sy, err := placementScale(req, .8, 100, 200, 100, 100)
+		artifact, err := os.ReadFile(req.PrintCanvasPath(index))
 		if err != nil {
 			t.Fatal(err)
 		}
-		x, y := placementCenter(req, 100, 200, 100*sx, 100*sy)
-		p, err := legacyPlacement(req, .8, 100, 200, 100, 100, sx, sy, x, y)
-		if err != nil || math.Abs(p.Scale-.8) > 1e-12 {
-			t.Fatalf("fit %s changed its scale basis: %+v %v", fit, p, err)
-		}
-	}
-	req := psx.RenderRequest{Fit: psx.FitCover, AnchorX: 2, ContentBounds: [4]float64{.1, 0, .9, 1}}
-	sx, sy, err := placementScale(req, .8, 100, 200, 100, 200)
-	if err != nil {
-		t.Fatal(err)
-	}
-	x, y := placementCenter(req, 100, 200, 100*sx, 200*sy)
-	p, err := legacyPlacement(req, .8, 100, 200, 100, 200, sx, sy, x, y)
-	if err != nil || math.Abs(p.Scale-1.25) > 1e-12 || !p.Constrained {
-		t.Fatalf("anchor override was reported as requested scale: %+v %v", p, err)
-	}
-}
-
-func TestLegacyPlacementReportsAbsoluteCenterForBottomAlignment(t *testing.T) {
-	req := psx.RenderRequest{Fit: psx.FitAuto, AlignBottom: true}
-	x, y := placementCenter(req, 100, 200, 100, 100)
-	p, err := legacyPlacement(req, 1, 100, 200, 100, 100, 1, 1, x, y)
-	if err != nil || p.OffsetX != 0 || p.OffsetY != .25 {
-		t.Fatalf("bottom anchor center was not reported: %+v %v", p, err)
-	}
-	// Subsequent rounds consume the actual centered offset, without reapplying the old bottom baseline.
-	req.AlignBottom, req.OffsetX, req.OffsetY = false, p.OffsetX, p.OffsetY
-	nx, ny := placementCenter(req, 100, 200, 100, 100)
-	if nx != x || ny != y {
-		t.Fatal("feeding the reported centered offset moved an unchanged placement")
-	}
-}
-
-func TestLegacyPlacementRejectsUnrepresentableStretchAndInvalidCellMapping(t *testing.T) {
-	req := psx.RenderRequest{Fit: psx.FitStretch, AnchorX: 2, ContentBounds: [4]float64{0, 0, 1, 1}}
-	sx, sy, err := placementScale(req, .8, 100, 200, 100, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := legacyPlacement(req, .8, 100, 200, 100, 100, sx, sy, 50, 100); err == nil {
-		t.Fatal("anisotropic fit cannot pretend to have a single actual scale multiplier")
-	}
-	for _, bounds := range [][]float64{nil, {0, 0, 100, 0}, {0, math.NaN(), 100, 100}, {0, 300, 100, 100}} {
-		doc := document{Width: 100, Height: 300, Layers: []layer{{Kind: "Group", Name: "插画", Visible: true, Children: []layer{{Kind: "Smart Object", Visible: true, SmartContents: &contents{ID: 7}, Bounds: bounds}}}}}
-		if _, err := legacyMetadata(psx.RenderRequest{Group: "插画"}, doc, map[int]psx.AppliedPlacement{7: {Scale: 1}}); err == nil {
-			t.Fatalf("invalid cell mapping was accepted: %v", bounds)
+		if fmt.Sprintf("%x", sha256.Sum256(artifact)) != metadata.CanvasSHA256 {
+			t.Fatal("metadata not bound to artifact")
 		}
 	}
 }

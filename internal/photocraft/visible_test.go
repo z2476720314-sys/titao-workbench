@@ -57,47 +57,33 @@ func TestDiagnosticAlphaEnhancesWeakPixelsAndPreservesStrongDetails(t *testing.T
 	}
 }
 
-func TestDiagnosticCanvasReusesExactPlacement(t *testing.T) {
+func TestDiagnosticCanvasReusesOriginalSharedSource(t *testing.T) {
 	var replies strings.Builder
-	for id := 1; id <= 10; id++ {
-		fmt.Fprintf(&replies, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"document\\\":1}\"}]}}\n", id)
+	for id := 1; id <= 2; id++ {
+		fmt.Fprintf(&replies, "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{}\"}]}}\n", id)
 	}
 	var requests bytes.Buffer
 	c := &client{enc: json.NewEncoder(&requests), dec: json.NewDecoder(strings.NewReader(replies.String()))}
-	placement := placedCanvas{Surface: visibleSurface{Width: 100, Height: 200, Cell: 2}, Layer: 8, Scale: .37, X: 44.25, Y: 103.75}
-	if err := c.replaceCanvas(placement, "pattern.png", "real-canvas.png"); err != nil {
+	if err := c.replaceCanvas(8, "real-canvas.png"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.replaceCanvas(placement, "alpha.png", "diagnostic-canvas.png"); err != nil {
+	if err := c.replaceCanvas(8, "diagnostic-canvas.png"); err != nil {
 		t.Fatal(err)
 	}
 	dec := json.NewDecoder(&requests)
-	var places []map[string]any
-	for dec.More() {
+	for _, path := range []string{"real-canvas.png", "diagnostic-canvas.png"} {
 		var call struct {
 			Params struct {
-				Name      string         `json:"name"`
-				Arguments map[string]any `json:"arguments"`
-			} `json:"params"`
+				Name      string
+				Arguments map[string]any
+			}
 		}
 		if err := dec.Decode(&call); err != nil {
 			t.Fatal(err)
 		}
-		if call.Params.Name == "doc_place" {
-			places = append(places, call.Params.Arguments)
+		if call.Params.Name != "doc_replace_smart_object" || call.Params.Arguments["layer"] != float64(8) || call.Params.Arguments["path"] != path {
+			t.Fatalf("source identity or canvas changed: %+v", call)
 		}
-	}
-	if len(places) != 2 {
-		t.Fatal("missing actual/diagnostic placement")
-	}
-	for _, call := range places {
-		center := call["center"].([]any)
-		if call["scale"] != float64(37) || center[0] != float64(44.25) || center[1] != float64(103.75) || call["fit"] != false {
-			t.Fatalf("geometry was recalculated: %v", call)
-		}
-	}
-	if places[0]["path"] != "pattern.png" || places[1]["path"] != "alpha.png" {
-		t.Fatal("source/mask placement mixed")
 	}
 }
 
@@ -122,7 +108,6 @@ func TestStrictRenderRealCopiedTemplate(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	var cached string
 	var realHashes, metadataHashes [][32]byte
 	for n := 0; n < 2; n++ {
 		dir := filepath.Join(root, fmt.Sprintf("render-%d", n))
@@ -168,7 +153,7 @@ func TestStrictRenderRealCopiedTemplate(t *testing.T) {
 		if err = json.Unmarshal(data, &metadata); err != nil {
 			t.Fatal(err)
 		}
-		if !metadata.FrameVerified || len(metadata.Placements) != 7 {
+		if metadata.FrameVerified || !metadata.CanvasVerified || len(metadata.Placements) != 7 {
 			t.Fatalf("metadata=%+v", metadata)
 		}
 		for i := range req.Scales {
@@ -239,32 +224,14 @@ func TestStrictRenderRealCopiedTemplate(t *testing.T) {
 				}
 			}
 		}
-		if n == 0 {
-			for _, p := range s.prepared {
-				cached = p.Path
-			}
-		} else {
-			if len(s.prepared) != 1 {
-				t.Fatal("same template was recalibrated")
-			}
-			for _, p := range s.prepared {
-				if p.Path != cached {
-					t.Fatal("prepared cache not reused")
-				}
-			}
-		}
 		for _, p := range metadata.Placements {
 			if p.Scale <= 0 || p.Scale > 1.000001 {
 				t.Fatalf("invalid effective placement %+v", p)
 			}
 		}
 	}
-	cacheRoot := s.cacheRoot
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
-	}
-	if _, err = os.Stat(cacheRoot); !os.IsNotExist(err) {
-		t.Fatalf("private calibration cache not removed: %v", err)
 	}
 	after, err := os.ReadFile(template)
 	if err != nil || sha256.Sum256(after) != before {
@@ -272,92 +239,10 @@ func TestStrictRenderRealCopiedTemplate(t *testing.T) {
 	}
 }
 
-func TestMakeUniqueCommandsKeepOriginalsHiddenAndNameEachCopy(t *testing.T) {
-	args, names, err := uniqueCommands("source.tif", "prepared.psd", []layer{{ID: 18}, {ID: 20}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(names) != 2 || names[0] == names[1] {
-		t.Fatalf("copy names=%v", names)
-	}
-	joined := strings.Join(args, " ")
-	if strings.Count(joined, "layer.smartObjects.newSmartObjectViaCopy") != 2 || strings.Count(joined, `"visible":false`) != 2 {
-		t.Fatal(joined)
-	}
-	for _, name := range names {
-		if !strings.Contains(joined, name) {
-			t.Fatal("independent copy not named")
-		}
-	}
-	if args[0] != "run" || args[1] != "source.tif" || args[len(args)-2] != "--out" || args[len(args)-1] != "prepared.psd" {
-		t.Fatal(args)
-	}
-	if _, _, err := uniqueCommands("same.tif", "same.tif", []layer{{ID: 18}}); err == nil {
-		t.Fatal("preparation may overwrite template")
-	}
-}
-
-func TestPreparedKeyUsesTemplateBytesGroupAndCell(t *testing.T) {
-	dir := t.TempDir()
-	file := filepath.Join(dir, "template.tif")
-	if err := os.WriteFile(file, []byte("template"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	req := psx.RenderRequest{TemplateCopy: file, Group: "插画", CellSize: 800}
-	first, err := preparedKey(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, change := range []string{"group", "cell", "bytes"} {
-		changed := req
-		switch change {
-		case "group":
-			changed.Group = "other"
-		case "cell":
-			changed.CellSize = 400
-		case "bytes":
-			if err := os.WriteFile(file, []byte("new template"), 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		key, err := preparedKey(changed)
-		if err != nil || key == first {
-			t.Fatalf("%s did not invalidate calibration: %v", change, err)
-		}
-	}
-}
-
-func TestStrictPlacementUsesContainBaseAndReturnsActualCenter(t *testing.T) {
-	area := psx.VisibleArea{Cell: 2, Polygon: []psx.Point{{0, 0}, {1, 0}, {1, .9}, {0, .9}}}
-	hull := []psx.Point{{0, 0}, {1, 0}, {1, 1}, {0, 1}}
-	req := psx.RenderRequest{Fit: "cover", NoCrop: true, OffsetY: .2, AnchorX: 2, AnchorY: 1}
-	applied, sx, x, y, err := strictPlacement(req, area, hull, 100, 200, 100, 100, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if applied.Cell != 2 || applied.Scale != 1 || sx != 1 || x != 50 || y > 130.000001 {
-		t.Fatalf("actual placement=%+v scale=%v center=%v,%v", applied, sx, x, y)
-	}
-	data, err := json.Marshal(applied)
-	if err != nil || len(data) == 0 {
-		t.Fatal(err)
-	}
-}
-
 func TestStrictRejectsEmptyScalesBeforeStartingEditor(t *testing.T) {
 	s := New(filepath.Join(t.TempDir(), "missing-editor.exe"))
 	if _, err := s.Render(psx.RenderRequest{NoCrop: true}); err == nil || !strings.Contains(err.Error(), "档位") {
 		t.Fatalf("empty scales accepted or editor started: %v", err)
-	}
-}
-
-func TestStrictNaturalContourDoesNotInheritLegacyBottomAnchor(t *testing.T) {
-	area := psx.VisibleArea{Polygon: []psx.Point{{0, 0}, {1, 0}, {1, 1}, {0, 1}}}
-	hull := []psx.Point{{.5, 0}, {1, .5}, {.5, 1}, {0, .5}}
-	req := psx.RenderRequest{NoCrop: true, AlignBottom: true}
-	p, _, _, _, err := strictPlacement(req, area, hull, 100, 200, 100, 100, 1)
-	if err != nil || p.OffsetY != 0 || p.AnchorUnmet {
-		t.Fatalf("natural contour acquired a bottom anchor: %+v %v", p, err)
 	}
 }
 
@@ -384,23 +269,15 @@ func TestPrivateTempEnvAndClosePreserveCallerDirectory(t *testing.T) {
 	if temp != 1 || tmp != 1 {
 		t.Fatalf("TEMP=%d TMP=%d", temp, tmp)
 	}
-	owned, err := os.MkdirTemp(root, "owned-")
-	if err != nil {
-		t.Fatal(err)
-	}
+
 	caller := filepath.Join(root, "caller.txt")
-	if err = os.WriteFile(caller, []byte("keep"), 0600); err != nil {
+	if err := os.WriteFile(caller, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s := New("")
-	s.cacheRoot = owned
-	if err = s.Close(); err != nil {
+	if err := New("").Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = os.Stat(owned); !os.IsNotExist(err) {
-		t.Fatal("cache remains")
-	}
-	if _, err = os.Stat(caller); err != nil {
+	if _, err := os.Stat(caller); err != nil {
 		t.Fatal("caller data removed")
 	}
 }

@@ -50,16 +50,16 @@ type Config struct {
 	CellSize   int    `json:"cell_size"`
 	JPGQuality int    `json:"jpg_quality"`
 	TrimAlpha  bool   `json:"trim_alpha"`
-	// NoCrop 禁止裁切：图案整体必须完整可见。
+	// NoCrop 保护共享印刷域内的有效内容；照片裁切与遮挡仍需逐角评审。
 	// 用指针是为了区分「旧配置里根本没这个键」（nil → 取默认 true）
 	// 和「用户明确关掉」（&false）。若用裸 bool，老配置升级后会被零值
 	// 静默改成关闭，用户看不到任何提示就丢了这层保护。
-	NoCrop  *bool   `json:"no_crop"` // 禁止裁切：图案整体必须完整可见（默认开）
+	NoCrop  *bool   `json:"no_crop"` // 保护印刷域有效内容（默认开）
 	OffsetX float64 `json:"offset_x"`
 	OffsetY float64 `json:"offset_y"`
 
 	// 参数自动微调：多轮迭代收敛（模型自行决定候选区间与微调量）
-	MaxRounds  int  `json:"max_rounds"`   // 最大迭代轮数，1~3，默认 3
+	MaxRounds  int  `json:"max_rounds"`   // 评审微调轮数，1~10，默认 3
 	AutoTuneOn bool `json:"auto_tune_on"` // 是否启用多轮自动微调
 
 	// 套图前预检：识别水印 / 镜头框 / 手机壳实拍图并跳过
@@ -274,12 +274,12 @@ func normalize(c *Config) {
 		c.NoCrop = boolPtr(true)
 	}
 
-	// 多轮迭代：1~3 轮，超范围收回，0 视为未配置用默认 3
+	// 多轮迭代：默认 3 轮，用户可上调到 10 轮，超范围收回；0 视为未配置用默认 3
 	if c.MaxRounds <= 0 {
 		c.MaxRounds = 3
 	}
-	if c.MaxRounds > 3 {
-		c.MaxRounds = 3
+	if c.MaxRounds > 10 {
+		c.MaxRounds = 10
 	}
 
 	// 生图

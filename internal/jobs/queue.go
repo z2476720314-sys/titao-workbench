@@ -20,7 +20,7 @@ import (
 
 // QueueVersion 是 queue.json 的格式版本。读到不认识的版本按「损坏」处理，
 // 宁可丢掉恢复能力，也不要拿旧结构去驱动新引擎。
-const QueueVersion = 1
+const QueueVersion = 2
 
 // QueueTask 是队列文件里的一行任务。
 //
@@ -28,6 +28,9 @@ const QueueVersion = 1
 // 与内存里的 Task（驼峰）刻意不同：前者是落盘格式，后者是 Wails 传输格式，
 // 两者的演进节奏不该互相绑架。
 type QueueTask struct {
+	CanvasSHA256    string        `json:"canvas_sha256,omitempty"`
+	CanvasPath      string        `json:"canvas_path,omitempty"`
+	StaticCells     []int         `json:"static_cells,omitempty"`
 	CompletionKey   string        `json:"completion_key,omitempty"`
 	ID              int           `json:"id"`
 	Pattern         string        `json:"pattern"`
@@ -106,6 +109,7 @@ func NewQueue(opt Options, tasks []*Task) *Queue {
 	}
 	for i, t := range tasks {
 		q.Tasks[i] = QueueTask{
+			CanvasSHA256: t.CanvasSHA256, CanvasPath: t.CanvasPath, StaticCells: append([]int(nil), t.StaticCells...),
 			CompletionKey:   t.CompletionKey,
 			ID:              t.ID,
 			Pattern:         t.Pattern,
@@ -139,6 +143,7 @@ func (q *Queue) ToTasks() []*Task {
 	out := make([]*Task, len(q.Tasks))
 	for i, qt := range q.Tasks {
 		out[i] = &Task{
+			CanvasSHA256: qt.CanvasSHA256, CanvasPath: qt.CanvasPath, StaticCells: append([]int(nil), qt.StaticCells...),
 			CompletionKey:   qt.CompletionKey,
 			ID:              qt.ID,
 			Pattern:         qt.Pattern,

@@ -61,3 +61,7 @@ precheck.sample*.jsonl
 # 测试与覆盖率
 coverage.out
 coverage.html
+
+# 本地 agent 工作目录与 Serena 缓存（不进仓库）
+.planning/
+.serena/

@@ -52,10 +52,10 @@ export namespace cfg {
 	        this.renderer = source["renderer"];
 	        this.photocraft_cli = source["photocraft_cli"];
 	        this.base_url = source["base_url"];
-	        this.api_key = source.api_key;
+	        this.api_key = source["api_key"];
 	        this.model = source["model"];
 	        this.tune_model = source["tune_model"];
-	        this.tune_api_key = source.tune_api_key;
+	        this.tune_api_key = source["tune_api_key"];
 	        this.max_tokens = source["max_tokens"];
 	        this.timeout_seconds = source["timeout_seconds"];
 	        this.temperature = source["temperature"];
@@ -81,7 +81,7 @@ export namespace cfg {
 	        this.precheck_on = source["precheck_on"];
 	        this.precheck_skip = source["precheck_skip"];
 	        this.gen_base_url = source["gen_base_url"];
-	        this.gen_api_key = source.gen_api_key;
+	        this.gen_api_key = source["gen_api_key"];
 	        this.gen_model = source["gen_model"];
 	        this.gen_size = source["gen_size"];
 	        this.gen_thinking = source["gen_thinking"];
@@ -254,6 +254,9 @@ export namespace jobs {
 	    }
 	}
 	export class QueueTask {
+	    canvas_sha256?: string;
+	    canvas_path?: string;
+	    static_cells?: number[];
 	    completion_key?: string;
 	    id: number;
 	    pattern: string;
@@ -280,6 +283,9 @@ export namespace jobs {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.canvas_sha256 = source["canvas_sha256"];
+	        this.canvas_path = source["canvas_path"];
+	        this.static_cells = source["static_cells"];
 	        this.completion_key = source["completion_key"];
 	        this.id = source["id"];
 	        this.pattern = source["pattern"];
@@ -300,7 +306,7 @@ export namespace jobs {
 	        this.tune_rounds = source["tune_rounds"];
 	        this.tune_history = this.convertValues(source["tune_history"], tuner.Round);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -363,6 +369,10 @@ export namespace jobs {
 	}
 	
 	export class Task {
+	    canvasSha256?: string;
+	    canvasPath?: string;
+	    staticCells?: number[];
+	    reviewQuarterTurns?: Record<number, number>;
 	    fillTop?: boolean;
 	    id: number;
 	    pattern: string;
@@ -391,6 +401,10 @@ export namespace jobs {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.canvasSha256 = source["canvasSha256"];
+	        this.canvasPath = source["canvasPath"];
+	        this.staticCells = source["staticCells"];
+	        this.reviewQuarterTurns = source["reviewQuarterTurns"];
 	        this.fillTop = source["fillTop"];
 	        this.id = source["id"];
 	        this.pattern = source["pattern"];
@@ -413,7 +427,7 @@ export namespace jobs {
 	        this.tuneHistory = this.convertValues(source["tuneHistory"], tuner.Round);
 	        this.elapsedMs = source["elapsedMs"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -532,20 +546,22 @@ export namespace psx {
 	    Scale: number;
 	    OffsetX: number;
 	    OffsetY: number;
+	    stretch_y?: number;
 	    Cell: number;
 	    Constrained: boolean;
 	    AnchorUnmet: boolean;
 	    AnchorImpossible: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AppliedPlacement(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.Scale = source["Scale"];
 	        this.OffsetX = source["OffsetX"];
 	        this.OffsetY = source["OffsetY"];
+	        this.stretch_y = source["stretch_y"];
 	        this.Cell = source["Cell"];
 	        this.Constrained = source["Constrained"];
 	        this.AnchorUnmet = source["AnchorUnmet"];
@@ -640,7 +656,7 @@ export namespace psx {
 }
 
 export namespace tuner {
-
+	
 	export class Round {
 	    applied?: psx.AppliedPlacement[];
 	    Index: number;
@@ -651,11 +667,11 @@ export namespace tuner {
 	    Problem: string;
 	    Good: boolean;
 	    camera_clear: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new Round(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.applied = this.convertValues(source["applied"], psx.AppliedPlacement);
@@ -668,7 +684,7 @@ export namespace tuner {
 	        this.Good = source["Good"];
 	        this.camera_clear = source["camera_clear"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;

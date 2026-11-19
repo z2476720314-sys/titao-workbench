@@ -234,12 +234,12 @@ func cutEdgeAnchors(img *image.NRGBA) (int, int) {
 	}
 	x, y := 0, 0
 	// The camera end remains free when both vertical cuts are equally strong.
-	if max(left, right) >= .2 {
+	if max(left, right) >= .15 {
 		x = -1
 		if right > left {
 			x = 1
 		}
-		if min(left, right) >= .2 {
+		if min(left, right) >= .15 {
 			x = 2
 		}
 	}

@@ -50,6 +50,9 @@
   let patternLimit = 0
   let maxRounds = 3
   let noCrop = true
+  // 任务预览：开始前显示「将处理 K 组」，由后端 PlanTasks 计算，不执行渲染。
+  let planHint = ''
+  let planLoading = false
   let advOpen = false
 
   // 任务
@@ -107,10 +110,39 @@
   let genThumbs: Record<string, string> = {}
   let genLoading = false
 
-  const GEN_MODE_OPTS = [
+  // 生图模式由后端 GenModes 提供，前端不写死。
+  // 后端加了新模式、改了文案，这里自动跟上；取不到时才退回内置清单。
+  let GEN_MODE_OPTS: { id: string; label: string; hint: string }[] = [
     { id: 'handheld', label: '新手持图', hint: '换手持姿态与场景，壳不变' },
     { id: 'background', label: '换背景图', hint: '换背景环境，不出现手' },
   ]
+
+  const GEN_MODE_HINTS: Record<string, string> = {
+    handheld: '换手持姿态与场景，壳不变',
+    background: '换背景环境，不出现手',
+  }
+
+  async function loadGenModes() {
+    try {
+      const modes = await api.GenModes()
+      if (Array.isArray(modes) && modes.length) {
+        GEN_MODE_OPTS = modes.map((m: any) => ({
+          id: m.id,
+          label: m.label || m.id,
+          hint: GEN_MODE_HINTS[m.id] || '',
+        }))
+        // 当前勾选的模式若后端已不再提供，落回第一项，避免发出无效请求
+        const ids = GEN_MODE_OPTS.map((m) => m.id)
+        if (!genModes.length || !genModes.some((id) => ids.includes(id))) {
+          genModes = [ids[0]]
+        } else {
+          genModes = genModes.filter((id) => ids.includes(id))
+        }
+      }
+    } catch {
+      // 后端不可用时保留内置清单，不阻塞生图页
+    }
+  }
 
   function genStamp() {
     const d = new Date()
@@ -296,6 +328,7 @@
     refreshStatus()
     refreshQueue()
     refreshGen()
+    loadGenModes()
     checkUpdate()
     loadCaps()
     if (view === 'outputs') loadOutputs()
@@ -463,6 +496,7 @@
       if (fs?.length) {
         patternPaths = uniq([...patternPaths, ...fs])
         await saveWorkspace()
+        refreshPlan()
       }
     } catch (e: any) {
       notify('err', String(e))
@@ -475,6 +509,7 @@
       if (d) {
         patternPaths = uniq([...patternPaths, d])
         await saveWorkspace()
+        refreshPlan()
       }
     } catch (e: any) {
       notify('err', String(e))
@@ -487,6 +522,7 @@
       if (fs?.length) {
         templatePaths = uniq([...templatePaths, ...fs])
         await saveWorkspace()
+        refreshPlan()
       }
     } catch (e: any) {
       notify('err', String(e))
@@ -499,6 +535,7 @@
       if (d) {
         templatePaths = uniq([...templatePaths, d])
         await saveWorkspace()
+        refreshPlan()
       }
     } catch (e: any) {
       notify('err', String(e))
@@ -557,19 +594,15 @@
   }
 
   // ---------------- 运行 ----------------
-  async function startRun() {
-    if (!patternPaths.length) return notify('warn', '请先添加图案')
-    if (!templatePaths.length) return notify('warn', '请先添加模板')
-    if (!psStatus.available) return notify('err', engineName + ' 未就绪：' + (psStatus.error || '未知'))
-    if (!Number.isInteger(Number(patternLimit)) || Number(patternLimit) < 0) return notify('warn', '图案数量需为非负整数')
-    if (!(await saveWorkspace())) return
-
+  // 套图页的参数组装只写一份：startRun 和 refreshPlan 都用它，
+  // 避免「预览说 K 组、实际跑 M 组」这类不一致。
+  function buildRunOptions() {
     const scales = manualScale
       .split(/[,，\s]+/)
       .map((s) => parseFloat(s))
       .filter((n) => !isNaN(n) && n > 0)
 
-    const opt = {
+    return {
       patterns: patternPaths,
       patternLimit: Number(patternLimit),
       templates: templatePaths,
@@ -587,6 +620,37 @@
       maxRounds: Number(maxRounds) || 0,
       noCrop,
     }
+  }
+
+  // 只算不跑：由后端展开成任务清单，返回「将处理 K 组」的提示。
+  async function refreshPlan() {
+    if (!patternPaths.length || !templatePaths.length) {
+      planHint = ''
+      return
+    }
+    planLoading = true
+    try {
+      const planned = await api.PlanTasks(buildRunOptions() as any)
+      const n = Array.isArray(planned) ? planned.length : 0
+      const patterns = new Set(planned.map((t: any) => t.patternName)).size
+      planHint = n
+        ? `将处理 ${n} 组（${patterns} 个图案 × ${templatePaths.length} 个模板${Number(patternLimit) > 0 ? `，上限 ${patternLimit} 个图案` : ''}）`
+        : '没有待处理的任务：所选图案可能都已完成'
+    } catch {
+      // 预览失败不影响开始，静默清空即可
+      planHint = ''
+    }
+    planLoading = false
+  }
+
+  async function startRun() {
+    if (!patternPaths.length) return notify('warn', '请先添加图案')
+    if (!templatePaths.length) return notify('warn', '请先添加模板')
+    if (!psStatus.available) return notify('err', engineName + ' 未就绪：' + (psStatus.error || '未知'))
+    if (!Number.isInteger(Number(patternLimit)) || Number(patternLimit) < 0) return notify('warn', '图案数量需为非负整数')
+    if (!(await saveWorkspace())) return
+
+    const opt = buildRunOptions()
 
     logs = []
     tasks = []
@@ -605,14 +669,14 @@
     }
   }
 
-  /** 暂停：当前这组跑完才停，所以按钮立刻进入 paused 态等它收尾。 */
+  /** 暂停：当前不可中断操作返回后停，继续沿用已有进度。 */
   async function pauseRun() {
     if (actLoading) return
     actLoading = true
     try {
       await api.PauseRun()
       runState = 'paused'
-      notify('info', '已暂停：当前这张做完就停在组边界')
+      notify('info', '已请求暂停：当前渲染或评审返回后停住，继续时沿用当前进度')
     } catch (e: any) {
       notify('err', String(e))
     }
@@ -642,7 +706,7 @@
     try {
       await api.StopRun()
       runState = 'stopping'
-      notify('info', '已请求停止：当前这张做完就收尾，未执行的组标为已取消')
+      notify('info', '已请求停止：当前操作返回后取消未完成套图，保留已有成品')
     } catch (e: any) {
       notify('err', String(e))
     }
@@ -731,6 +795,36 @@
     genHasKey = !!conf.gen_api_key
   }
 
+  // 套图页的参数改动即时落盘：这些值原本只存在于局部变量里，
+  // 刷新界面就丢失，用户看不出「改了但没保存」。
+  // 只提交与配置同名的字段，不动路径（路径由 saveWorkspace 管）。
+  let formSavePending = false
+  async function saveFormParams() {
+    if (!conf || formSavePending) return
+    formSavePending = true
+    try {
+      const next = {
+        ...conf,
+        group,
+        fit,
+        trim_alpha: trimAlpha,
+        no_crop: noCrop,
+        jpg_quality: Number(jpgQuality) || 95,
+        cell_size: Number(cellSize) || 800,
+        offset_x: Number(offsetX) || 0,
+        offset_y: Number(offsetY) || 0,
+        auto_tune_on: auto,
+        max_rounds: Number(maxRounds) || 3,
+      }
+      const saved = await api.SaveConfig(next as any)
+      conf = saved
+    } catch (e: any) {
+      // 保存失败不打断操作，下次改动会重试
+      notify('warn', '参数保存失败：' + String(e))
+    }
+    formSavePending = false
+  }
+
   async function saveConf() {
     if (!conf) return
     savingConf = true
@@ -751,11 +845,11 @@
   }
 
   const FIT_OPTS = [
-    { v: 'auto', label: 'auto · 原画布等比摆放（推荐）', hint: '保留透明度和原构图，按不裁切设置确定边界' },
+    { v: 'auto', label: 'auto · 原画布等比摆放（推荐）', hint: '以原比例为基准，必要时允许3%以内轻微比例调整，保留透明度和有效内容' },
     { v: 'contain', label: 'contain · 完整放下', hint: '同 auto，显式指定' },
     { v: 'cover', label: 'cover · 铺满', hint: '以铺满为基准' },
-    { v: 'stretch', label: 'stretch · 拉伸变形', hint: '不保持宽高比' },
-    { v: 'none', label: 'none · 原始像素', hint: '不做任何缩放' },
+    { v: 'stretch', label: 'stretch · 拉伸变形', hint: '关闭不裁切时允许改变宽高比' },
+    { v: 'none', label: 'none · 原始像素', hint: '以原始像素为基准' },
   ]
 
   const phaseLabel: Record<string, string> = {
@@ -977,11 +1071,11 @@
         <div class="grid-2">
           <div class="field" style="margin-bottom:0">
             <label class="check-row">
-              <input type="checkbox" bind:checked={auto} />
+              <input type="checkbox" bind:checked={auto} on:change={saveFormParams} />
               <span style="color:var(--text);font-size:12px">视觉模型自动判断图案大小</span>
             </label>
             <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-              保留原画布、比例和透明度；开启不裁切时按照片可见边界摆放，再检查文字与主体遮挡。
+              同图本批所选模板共用 945×1890 印刷画布，从 1.0 开始；微调同步更新全组。
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
@@ -995,11 +1089,11 @@
             <div class="grid-2">
               <div class="field">
                 <span class="lbl">图层组</span>
-                <input type="text" bind:value={group} placeholder="插画" />
+                <input type="text" bind:value={group} placeholder="插画" on:change={saveFormParams} />
               </div>
               <div class="field">
                 <span class="lbl">摆放方式</span>
-                <select bind:value={fit}>
+                <select bind:value={fit} on:change={saveFormParams}>
                   {#each FIT_OPTS as o}
                     <option value={o.v}>{o.label}</option>
                   {/each}
@@ -1012,17 +1106,17 @@
 
             <div class="grid-2">
               <div class="field">
-                <span class="lbl">手动档位（留空=用模型或配置里的候选）</span>
+                <span class="lbl">手动档位（留空用配置）</span>
                 <input type="text" bind:value={manualScale} placeholder="例如 0.95,1.05,1.15" />
                 <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-                  1.0 = 完整放下的基准；开启不裁切时按实际边界收敛。填写后不调模型。
+                  手动模式使用第一档；1.0 = 完整放下的基准，不裁切保护印刷域内容。
                 </div>
               </div>
               <div class="field">
-                <span class="lbl">最大迭代轮数</span>
-                <input type="number" min="1" max="3" bind:value={maxRounds} />
+                <span class="lbl">评审轮数</span>
+                <input type="number" min="1" max="10" bind:value={maxRounds} on:change={saveFormParams} />
                 <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-                  1 = 一轮评审；2~3 = 主要内容确有问题时继续微调。
+                  1 = 只评审一轮；默认 3；可调到 10。改动即时保存，下次套图直接生效。
                 </div>
               </div>
             </div>
@@ -1030,37 +1124,37 @@
             <div class="grid-4">
               <div class="field">
                 <span class="lbl">水平微调</span>
-                <input type="number" step="0.01" bind:value={offsetX} />
+                <input type="number" step="0.01" bind:value={offsetX} on:change={saveFormParams} />
                 <div style="font-size:10px;color:var(--muted)">0.1 = 右移 10%</div>
               </div>
               <div class="field">
                 <span class="lbl">垂直微调</span>
-                <input type="number" step="0.01" bind:value={offsetY} />
+                <input type="number" step="0.01" bind:value={offsetY} on:change={saveFormParams} />
                 <div style="font-size:10px;color:var(--muted)">-0.1 = 上移 10%</div>
               </div>
               <div class="field">
                 <span class="lbl">格边长</span>
-                <input type="number" bind:value={cellSize} />
+                <input type="number" bind:value={cellSize} on:change={saveFormParams} />
               </div>
               <div class="field">
                 <span class="lbl">JPG 质量</span>
-                <input type="number" min="1" max="100" bind:value={jpgQuality} />
+                <input type="number" min="1" max="100" bind:value={jpgQuality} on:change={saveFormParams} />
               </div>
             </div>
 
             <div class="field" style="margin-bottom:0">
               <label class="check-row">
-                <input type="checkbox" bind:checked={noCrop} />
-                <span style="color:var(--text);font-size:12px">图案必须完整可见（不裁切）</span>
+                <input type="checkbox" bind:checked={noCrop} on:change={saveFormParams} />
+                <span style="color:var(--text);font-size:12px">印刷画布内不裁切</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                只允许全透明留白越界，浅色和半透明内容也受保护；严格照片边界校验需要 PhotoCraft。
+                浅色和半透明内容也受保护；最终照片的文字、人物和主要物体整体仍需逐角检查裁切与镜头遮挡。
               </div>
             </div>
 
             <div class="field" style="margin-bottom:0">
               <label class="check-row">
-                <input type="checkbox" bind:checked={trimAlpha} disabled={auto && (fit === 'auto' || fit === 'contain')} />
+                <input type="checkbox" bind:checked={trimAlpha} on:change={saveFormParams} disabled={auto && (fit === 'auto' || fit === 'contain')} />
                 <span style="color:var(--text);font-size:12px">手动模式裁掉图案透明留白</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
@@ -1092,6 +1186,9 @@
         <button class="primary" on:click={startRun} disabled={running || !patternPaths.length || !templatePaths.length || !psStatus.available}>
           {runState === 'running' ? '运行中…' : runState === 'paused' ? '已暂停' : runState === 'stopping' ? '正在停止…' : '开始套图'}
         </button>
+        {#if planHint}
+          <span class="card-hint" style="align-self:center">{planHint}</span>
+        {/if}
         {#if runState === 'running'}
           <button on:click={pauseRun} disabled={actLoading}>暂停</button>
         {/if}
@@ -1118,7 +1215,7 @@
       <div class="page-head">
         <div>
           <h1 class="page-title">任务队列</h1>
-          <div class="page-desc">每个「图案 × 模板」是一个组合，按组合串行渲染，支持暂停与继续。</div>
+          <div class="page-desc">同一图案统一版位；暂停在当前操作返回后生效，继续沿用当前进度。</div>
         </div>
         <div class="row">
           {#if runState === 'running'}
@@ -1190,7 +1287,7 @@
                       {(t.error || t.message || '').slice(0, 40)}
                     </div>
                   </td>
-                  <td class="mono" style="color:var(--muted)" title={t.judgeNote || ''}>{t.chosenScale ? '×' + t.chosenScale : '—'}</td>
+                  <td class="mono" style="color:var(--muted)" title={t.judgeNote || ''}>{t.chosenScale ? '×' + Number(t.chosenScale.toFixed(3)) : '—'}</td>
                   <td class="mono" style="color:var(--muted)">{t.tuneRounds || '—'}</td>
                   <td class="mono">{t.files?.length || 0}</td>
                   <td class="mono" style="color:var(--muted)">{t.elapsedMs ? (t.elapsedMs / 1000).toFixed(1) + 's' : '—'}</td>
@@ -1524,6 +1621,8 @@
                     <div class="thumb-ph"></div>
                   {/if}
                   <div class="cap">{baseName(f)}</div>
+                  <button class="ghost thumb-locate" title="在资源管理器里定位这张图"
+                          on:click|stopPropagation={() => api.RevealInExplorer(f)}>定位</button>
                 </div>
               {/each}
             </div>
@@ -1623,14 +1722,14 @@
             </div>
           </div>
           <div class="field">
-            <span class="lbl">其他适配模式的候选倍数（逗号分隔）</span>
+            <span class="lbl">手动模式档位（逗号分隔）</span>
             <input type="text" value={(conf.candidates || []).join(', ')}
                    on:change={(e) => {
                      const v = (e.currentTarget as HTMLInputElement).value
                      conf.candidates = v.split(/[,，\s]+/).map((s) => parseFloat(s)).filter((n) => !isNaN(n) && n > 0)
                    }} />
             <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-              自动微调的 auto / contain 从 1.0 开始；其他模式或关闭自动微调时使用候选倍数。
+              自动模式从统一 1.0 版位开始；手动模式使用配置的第一档。
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
@@ -1767,12 +1866,12 @@
             <div class="field" style="margin-bottom:0">
               <label class="check-row">
                 <input type="checkbox" bind:checked={conf.no_crop} />
-                <span style="color:var(--text);font-size:12px">默认禁止裁切</span>
+                <span style="color:var(--text);font-size:12px">默认印刷画布内不裁切</span>
               </label>
             </div>
           </div>
           <div style="font-size:10.5px;color:var(--muted);margin-top:6px;line-height:1.7">
-            禁止裁切开启后，图案整体必须完整可见，放大上限自动压到「完整放下」；宽扁、窄长图案建议保持开启。
+            不裁切保护印刷域内的有效内容和透明度；必要时允许3%以内轻微比例调整，主要图案的裁切与遮挡逐角评审。
           </div>
         </section>
 
@@ -1790,14 +1889,14 @@
                 <span style="color:var(--text);font-size:12px">启用多轮自动微调</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                先按原图铺放，只在主要内容明显裁切或遮挡时微调；正常直接通过，满版图调整后仍须铺满。
+                逐角评审本批所选模板；需要调整时更新同一画布，并重新渲染全组。
               </div>
             </div>
             <div class="field">
-              <span class="lbl">最大迭代轮数</span>
-              <input type="number" min="1" max="3" bind:value={conf.max_rounds} />
+              <span class="lbl">评审轮数</span>
+              <input type="number" min="1" max="10" bind:value={conf.max_rounds} />
               <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-                默认最多 3 轮，每次渲染后均评审；未通过会提示人工复核。轮数越多，耗时和模型用量越高。
+                默认 3 轮，可调到 10。每次渲染后均评审；未通过会提示人工复核。轮数越多，耗时和模型用量越高。
               </div>
             </div>
           </div>
@@ -1865,9 +1964,9 @@
         <div class="card-head"><div class="card-title">工作原理</div></div>
         <ol style="margin:0;padding-left:18px;font-size:12px;line-height:1.85;color:#c8cad0">
           <li>模板 TIF 复制到临时目录，<b>原文件永不打开或修改</b>。</li>
-          <li>进入「插画」组里每个智能对象内部的 PSB，隐藏原有图层后置入图案并居中。</li>
-          <li>PhotoCraft 不裁切模式会独立处理每个照片角度，校准壳面与照片画面的可见边界。</li>
-          <li>按原画布等比摆放，检查文字、主体和截断边；需要时联合缩放与移动，约束冲突保留人工复核。</li>
+          <li>同一图案在本批所选模板共用 945×1890 印刷画布，模板只投影。</li>
+          <li>逐角检查主字、主眼、头部裁切和镜头遮挡；微调后全组同步更新。</li>
+          <li>明确截断边保持贴边；阶梯模板的两张静态照片保持原样，约束冲突保留人工复核。</li>
           <li>按每 <span class="mono">{cellSize}px</span> 一格切格，导出高质量 JPG。</li>
         </ol>
       </section>
@@ -1877,13 +1976,13 @@
         <table>
           <thead><tr><th style="width:100px">t</th><th>效果</th></tr></thead>
           <tbody>
-            <tr><td class="mono">1.0</td><td>以完整放下为基准，再按实际可见边界调整</td></tr>
+            <tr><td class="mono">1.0</td><td>以完整放入共享印刷画布为基准</td></tr>
             <tr><td class="mono">&lt; 1.0</td><td>留白，图案变小</td></tr>
-            <tr><td class="mono">&gt; 1.0</td><td>请求放大；开启不裁切时仍受实际内容边界限制</td></tr>
+            <tr><td class="mono">&gt; 1.0</td><td>请求放大；开启不裁切时仍受印刷域内容边界限制</td></tr>
           </tbody>
         </table>
         <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.7">
-          智能对象画布完整，不代表最终照片没有裁切。PhotoCraft 不裁切模式同时检查壳面和照片画面，
+          印刷画布内完整，不代表最终照片没有裁切或遮挡。主字、主眼和头部仍需逐角评审；
           不能同时满足内容完整与贴边时会提示人工复核。
         </div>
       </section>

@@ -630,6 +630,22 @@ th.mono {
   text-align: center;
 }
 
+/* 缩略图右上角的「定位」按钮：默认半透明，悬停缩略图才明显，
+   避免遮挡图案本身；点击时 stopPropagation 不触发大图预览。 */
+.thumb .thumb-locate {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  font-size: 9.5px;
+  padding: 1px 5px;
+  opacity: 0.35;
+  transition: opacity 0.12s;
+}
+.thumb:hover .thumb-locate,
+.thumb .thumb-locate:focus-visible {
+  opacity: 1;
+}
+
 /* ---------- 参数摘要 ---------- */
 .kv {
   display: grid;

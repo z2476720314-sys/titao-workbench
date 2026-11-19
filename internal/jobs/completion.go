@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,14 +22,33 @@ type completionFile struct {
 }
 
 type completionRecord struct {
-	Files       []completionInput `json:"files"`
-	Message     string            `json:"message,omitempty"`
-	JudgeNote   string            `json:"judge_note,omitempty"`
-	ChosenScale float64           `json:"chosen_scale,omitempty"`
+	Legacy       bool              `json:"legacy,omitempty"`
+	Canvas       *completionInput  `json:"canvas,omitempty"`
+	CanvasSHA256 string            `json:"canvas_sha256,omitempty"`
+	Files        []completionInput `json:"files"`
+	Message      string            `json:"message,omitempty"`
+	JudgeNote    string            `json:"judge_note,omitempty"`
+	ChosenScale  float64           `json:"chosen_scale,omitempty"`
+}
+
+func needsManualReview(message string) bool {
+	return strings.Contains(message, "人工复核")
 }
 
 func completionRecordOf(t *Task) (completionRecord, error) {
 	rec := completionRecord{Message: t.Message, JudgeNote: t.JudgeNote, ChosenScale: t.ChosenScale}
+	if t.CanvasSHA256 != "" || t.CanvasPath != "" {
+		file, err := completionInputOf(t.CanvasPath)
+		if err != nil {
+			return rec, err
+		}
+		hash, err := inputSHA(t.CanvasPath)
+		if err != nil || hash != t.CanvasSHA256 {
+			return rec, fmt.Errorf("公共印刷画布发生变化，未记录完成")
+		}
+		rec.Canvas = &file
+		rec.CanvasSHA256 = t.CanvasSHA256
+	}
 	for _, path := range t.Files {
 		file, err := completionInputOf(path)
 		if err != nil {
@@ -40,6 +60,12 @@ func completionRecordOf(t *Task) (completionRecord, error) {
 }
 
 func (rec completionRecord) valid() bool {
+	if rec.Legacy || needsManualReview(rec.Message) {
+		return false
+	}
+	if !rec.canvasValid() {
+		return false
+	}
 	for _, file := range rec.Files {
 		current, err := completionInputOf(file.Path)
 		if err != nil || current != file {
@@ -49,7 +75,22 @@ func (rec completionRecord) valid() bool {
 	return len(rec.Files) > 0
 }
 
+func (rec completionRecord) canvasValid() bool {
+	if rec.Canvas == nil {
+		return rec.CanvasSHA256 == ""
+	}
+	current, err := completionInputOf(rec.Canvas.Path)
+	if err != nil || current.Path != rec.Canvas.Path || current.Size != rec.Canvas.Size {
+		return false
+	}
+	hash, err := inputSHA(rec.Canvas.Path)
+	return err == nil && hash == rec.CanvasSHA256
+}
+
 func (rec completionRecord) resolve(outputRoot string) (completionRecord, bool) {
+	if rec.Legacy || needsManualReview(rec.Message) {
+		return rec, false
+	}
 	paths := make([]string, len(rec.Files))
 	for i, file := range rec.Files {
 		paths[i] = file.Path
@@ -66,6 +107,17 @@ func (rec completionRecord) resolve(outputRoot string) (completionRecord, bool) 
 			return rec, false
 		}
 		resolved.Files[i] = file
+	}
+	if rec.Canvas != nil && len(rec.Files) > 0 && filepath.Dir(rec.Canvas.Path) == filepath.Dir(rec.Files[0].Path) {
+		path := filepath.Join(filepath.Dir(paths[0]), filepath.Base(rec.Canvas.Path))
+		file, err := completionInputOf(path)
+		if err != nil || file.Size != rec.Canvas.Size || file.MTime != rec.Canvas.MTime {
+			return rec, false
+		}
+		resolved.Canvas = &file
+	}
+	if !resolved.canvasValid() {
+		return rec, false
 	}
 	return resolved, true
 }
@@ -142,12 +194,19 @@ func RestoreQueueTasks(q *Queue, outputRoot string) []*Task {
 	}
 	tasks := q.ToTasks()
 	for _, task := range tasks {
-		if task.Phase != PhaseDone {
+		if task.Phase != PhaseDone && task.Phase != PhaseFailed {
 			continue
+		}
+		oldParent := ""
+		if len(task.Files) > 0 {
+			oldParent = filepath.Dir(task.Files[0])
 		}
 		if files, valid := resolveCompletedFiles(task.Files, outputRoot); valid {
 			task.Files = files
 			task.OutputDir = filepath.Dir(files[0])
+			if task.CanvasPath != "" && filepath.Dir(task.CanvasPath) == oldParent {
+				task.CanvasPath = filepath.Join(task.OutputDir, filepath.Base(task.CanvasPath))
+			}
 		}
 	}
 	return tasks
@@ -213,6 +272,11 @@ func effectiveJobOptions(opt Options, def cfg.Config) Options {
 	return opt
 }
 
+// maxReviewRounds 是评审微调的硬上限。
+// 每轮都要真实渲染一次全组照片 + 逐格视觉评审，轮数越高耗时和额度消耗线性增长，
+// 10 轮已经足够收敛最难缠的图案，再高只会烧钱。
+const maxReviewRounds = 10
+
 func effectiveReviewSettings(opt Options, def cfg.Config) (bool, int) {
 	reviewOn := opt.Auto && def.AutoTuneOn
 	rounds := opt.MaxRounds
@@ -222,8 +286,8 @@ func effectiveReviewSettings(opt Options, def cfg.Config) (bool, int) {
 	if !reviewOn || rounds < 1 {
 		rounds = 1
 	}
-	if rounds > 3 {
-		rounds = 3
+	if rounds > maxReviewRounds {
+		rounds = maxReviewRounds
 	}
 	return reviewOn, rounds
 }
@@ -247,10 +311,7 @@ func completionKey(opt Options, def cfg.Config, t *Task) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	boundaryVersion := 0
-	if opt.NoCrop {
-		boundaryVersion = 1
-	}
+	boundaryVersion := 4
 	data, err := json.Marshal(struct {
 		Pattern                completionInput
 		Template               completionInput
@@ -356,7 +417,38 @@ func (f *completionFile) seedQueue(q *Queue, def cfg.Config) bool {
 	}
 	changed := false
 	for _, t := range RestoreQueueTasks(q, effectiveJobOptions(q.Options, def).OutputDir) {
-		if t.Phase != PhaseDone {
+		if t.Phase != PhaseDone || needsManualReview(t.Message) {
+			continue
+		}
+		if t.CanvasSHA256 == "" || t.CanvasPath == "" {
+			if _, valid := completionOutputs(t.Files); !valid {
+				continue
+			}
+			rec, err := completionRecordOf(t)
+			if err != nil {
+				continue
+			}
+			duplicate := false
+			for _, existing := range f.Records {
+				if slices.Equal(existing.Files, rec.Files) {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+			key := t.CompletionKey
+			if key == "" {
+				key, err = completionKey(q.Options, def, t)
+				if err != nil {
+					continue
+				}
+			}
+			legacyKey := sha256.Sum256([]byte("legacy:" + key))
+			rec.Legacy = true
+			f.Records[hex.EncodeToString(legacyKey[:])] = rec
+			changed = true
 			continue
 		}
 		earliest, valid := completionOutputs(t.Files)
@@ -417,6 +509,9 @@ func (e *Engine) Plan(opt Options) ([]*Task, error) {
 	if err := e.prepareTaskInputs(tasks); err != nil {
 		return nil, err
 	}
+	if err := validatePatternDestinations(tasks, effectiveJobOptions(opt, def).OutputDir); err != nil {
+		return nil, err
+	}
 	e.completionMu.Lock()
 	defer e.completionMu.Unlock()
 	f, err := e.loadCompletionHistory(def)
@@ -461,12 +556,39 @@ func (e *Engine) Plan(opt Options) ([]*Task, error) {
 			return nil, fmt.Errorf("保存成品改名记录失败: %w", err)
 		}
 	}
+	if e.groupFn != nil && len(pending) > 0 {
+		wanted := map[string]bool{}
+		for _, task := range pending {
+			wanted[patternGroupKey(task)] = true
+		}
+		var grouped []*Task
+		seen := map[string]bool{}
+		for _, task := range tasks {
+			if !wanted[patternGroupKey(task)] {
+				continue
+			}
+			key, err := completionKey(opt, def, task)
+			if err != nil {
+				return nil, err
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			task.ID, task.CompletionKey = len(grouped)+1, key
+			grouped = append(grouped, task)
+		}
+		pending = grouped
+	}
 	return pending, nil
 }
 
 func (e *Engine) recordCompletion(opt Options, def cfg.Config, t *Task) error {
-	if t.Phase != PhaseDone {
+	if t.Phase != PhaseDone || needsManualReview(t.Message) {
 		return nil
+	}
+	if e.groupFn != nil && (t.CanvasSHA256 == "" || t.CanvasPath == "") {
+		return fmt.Errorf("缺少公共印刷画布，未记录完成")
 	}
 	if _, valid := completionOutputs(t.Files); !valid {
 		return nil

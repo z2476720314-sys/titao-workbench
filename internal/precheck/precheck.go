@@ -129,7 +129,7 @@ func modelText(cfg Config, prompt string, views []string) (string, error) {
 	if timeout <= 0 {
 		timeout = 180 * time.Second
 	}
-	resp, err := judge.DoVisionRequest(req, timeout)
+	resp, err := judge.DoVisionRequest(req, timeout, cfg.BeforeRequest)
 	if err != nil {
 		return "", err
 	}

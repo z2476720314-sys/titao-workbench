@@ -42,8 +42,13 @@ func TestLiveFullMockups(t *testing.T) {
 			Path   string `json:"path"`
 			Reject bool   `json:"reject"`
 		} `json:"patterns"`
-		Templates []string `json:"templates"`
-		Output    string   `json:"output"`
+		Templates        []string `json:"templates"`
+		Output           string   `json:"output"`
+		Fit              string   `json:"fit"`
+		OffsetX, OffsetY float64
+		TrimAlpha        *bool `json:"trim_alpha"`
+		Precheck         *bool `json:"precheck"`
+		AutoTune         *bool `json:"auto_tune"`
 	}
 	b, err = os.ReadFile(manifest)
 	if err != nil {
@@ -54,6 +59,18 @@ func TestLiveFullMockups(t *testing.T) {
 	}
 	if len(cases.Patterns) == 0 || len(cases.Templates) == 0 || cases.Output == "" {
 		t.Fatal("empty QA plan")
+	}
+	if cases.Fit != "" {
+		settings.Fit = cases.Fit
+	}
+	if cases.TrimAlpha != nil {
+		settings.TrimAlpha = *cases.TrimAlpha
+	}
+	if cases.Precheck != nil {
+		settings.PrecheckOn = *cases.Precheck
+	}
+	if cases.AutoTune != nil {
+		settings.AutoTuneOn = *cases.AutoTune
 	}
 	var paths []string
 	rejected := map[string]bool{}
@@ -101,7 +118,7 @@ func TestLiveFullMockups(t *testing.T) {
 			e.pre.Close()
 		}
 	}()
-	opt := Options{Patterns: paths, Templates: cases.Templates, OutputDir: cases.Output, Group: settings.Group, Fit: settings.Fit, Scales: settings.Candidates, Auto: true, TrimAlpha: settings.TrimAlpha, NoCrop: settings.NoCropOn(), CellSize: settings.CellSize, JPGQuality: settings.JPGQuality, MaxRounds: settings.MaxRounds}
+	opt := Options{Patterns: paths, Templates: cases.Templates, OutputDir: cases.Output, Group: settings.Group, Fit: settings.Fit, Scales: settings.Candidates, Auto: true, TrimAlpha: settings.TrimAlpha, NoCrop: settings.NoCropOn(), CellSize: settings.CellSize, JPGQuality: settings.JPGQuality, MaxRounds: settings.MaxRounds, OffsetX: cases.OffsetX, OffsetY: cases.OffsetY}
 	tasks, err := Plan(opt, settings)
 	if err != nil {
 		t.Fatal(err)
@@ -121,6 +138,7 @@ func TestLiveFullMockups(t *testing.T) {
 	}
 	tasks = e.Tasks()
 	files := 0
+	canvasVersions := map[string]string{}
 	for _, task := range tasks {
 		original := task.Pattern
 		if task.OriginalPattern != "" {
@@ -132,6 +150,15 @@ func TestLiveFullMockups(t *testing.T) {
 			}
 		} else if task.Phase != PhaseDone {
 			t.Errorf("task not exported: %d %s %s", task.ID, task.Phase, task.Error)
+		}
+		if len(task.Files) > 0 {
+			if task.CanvasSHA256 == "" {
+				t.Error("missing shared canvas evidence")
+			}
+			if previous := canvasVersions[task.Pattern]; previous != "" && previous != task.CanvasSHA256 {
+				t.Error("templates used different canvas versions")
+			}
+			canvasVersions[task.Pattern] = task.CanvasSHA256
 		}
 		for _, p := range task.Files {
 			f, err := os.Open(p)

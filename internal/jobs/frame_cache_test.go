@@ -44,7 +44,7 @@ func legacyFrameKey(t *testing.T, opt Options, def cfg.Config, task *Task) strin
 	return fixtureSHA(data)
 }
 
-func TestStrictFrameDoesNotReuseUnverifiedLegacyCompletions(t *testing.T) {
+func TestSharedCanvasDoesNotReuseUnverifiedLegacyCompletions(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		for _, recordedKey := range []bool{false, true} {
 			t.Run(fmt.Sprint(strict, recordedKey), func(t *testing.T) {
@@ -90,10 +90,7 @@ func TestStrictFrameDoesNotReuseUnverifiedLegacyCompletions(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := 0
-				if strict {
-					want = 1
-				}
+				want := 1
 				if len(pending) != want {
 					t.Fatalf("legacy strict=%t key=%t pending=%d want%d", strict, recordedKey, len(pending), want)
 				}

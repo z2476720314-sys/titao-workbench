@@ -59,7 +59,7 @@ func (l *lazyEditor) get() (editorSession, error) {
 func (l *lazyEditor) Probe() (string, error) { l.mu.Lock(); defer l.mu.Unlock(); return l.version, nil }
 
 func (l *lazyEditor) Render(req psx.RenderRequest) (string, error) {
-	if req.NoCrop && (l.renderer == "" || l.renderer == "photoshop") {
+	if req.NoCrop && req.Canvas == nil && (l.renderer == "" || l.renderer == "photoshop") {
 		return "", psx.ErrStrictNoCropUnsupported
 	}
 	s, err := l.get()

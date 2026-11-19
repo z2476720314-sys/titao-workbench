@@ -76,9 +76,13 @@ func TestPrecheckAndTuningUseSeparateModels(t *testing.T) {
 	if len(models) < 2 || models[0] != "gpt-6-luna" || models[len(models)-1] != "deepseek-v4.1-flash" {
 		t.Fatalf("model routing=%v", models)
 	}
-	for _, model := range models[:len(models)-1] {
-		if model != "gpt-6-luna" {
-			t.Fatalf("non-precheck request before review: %v", models)
+	tuningStarted := false
+	for _, model := range models {
+		if model == "deepseek-v4.1-flash" {
+			tuningStarted = true
+		}
+		if (tuningStarted && model != "deepseek-v4.1-flash") || (!tuningStarted && model != "gpt-6-luna") {
+			t.Fatalf("model phase routing crossed: %v", models)
 		}
 	}
 	if len(editor.requests) != 1 || len(editor.requests[0].Scales) != 1 || editor.requests[0].Scales[0] != 1 || editor.requests[0].OffsetX != 0 || editor.requests[0].OffsetY != 0 {

@@ -17,22 +17,28 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"titao/internal/psx"
 )
 
 // Config 是视觉模型配置。
 type Config struct {
-	BaseURL      string
-	APIKey       string
-	Model        string
-	MaxTokens    int
-	Timeout      time.Duration
-	Temperature  float64
-	ImageMaxSide int
-	Thinking     bool
+	BaseURL       string
+	APIKey        string
+	Model         string
+	MaxTokens     int
+	Timeout       time.Duration
+	Temperature   float64
+	ImageMaxSide  int
+	Thinking      bool
+	BeforeRequest func() error `json:"-"`
 }
 
 // Placement 把实际渲染约束与原图一起交给选档和评审。
 type Placement struct {
+	DiagnosticViews         bool
+	FrameVerified           bool
+	ViewPlacements          []psx.AppliedPlacement
 	AppliedSummary          string
 	FillTop                 bool
 	AlignBottom             bool
@@ -48,13 +54,20 @@ type Placement struct {
 	Scale, OffsetX, OffsetY float64
 }
 
+const PrimaryContentRule = "先按原图的视觉层级区分主体与陪衬。主要内容包括重要文字、人物、动物及明显占画面主要面积的主要物体整体（如主树、主花），不只检查眼睛和头部。镜头遮挡主体显著部分或主物体的关键轮廓时必须判不合格。背景陪衬即使不重复，例如散落的小食品、独立小星形、小花或斑点，也允许自然被镜头遮挡，不能把所有非重复物体都当作主角；但主树顶上的星星等主体附属部分仍随主体一起保护。不得把背景图标的缺口误当成旁边文字笔画被挡。"
+
 func (p Placement) Description() string {
 	scale := "scale见各候选编号的实际倍率"
 	if p.Scale > 0 {
 		scale = fmt.Sprintf("scale=%.6g", p.Scale)
 	}
 	text := fmt.Sprintf("实际已应用参数：fit=%s，no_crop=%t，%s，offset_x=%.6g，offset_y=%.6g。零偏移为基准居中；dx/dy是相对本轮实际壳面画布宽/高的位移增量，正x向右、正y向下，scale_ratio乘当前实际倍率。按被遮深度与安全余量计算联合调整，不固定20%%，不按原图留白或成品照片像素直接换算。", p.Fit, p.NoCrop, scale, p.OffsetX, p.OffsetY)
-	text += "只可裁掉全透明空白，浅色或半透明的实际内容也不能越过壳边或画面。主字、主脸及主头部轮廓避开镜头；低对比不等于头部丢失。"
+	text += "印刷画布已保护实际内容；这不代表最终照片已经无裁切。逐角对照原图，重要文字、主眼睛和主头部轮廓必须完整且避开镜头，不能因打印域已验证就忽略照片裁切。低对比不等于头部丢失。"
+	text += "完整以原图实际存在的像素为准：原图已有的平直截断轮廓、半身或局部形象保持一致就算保留；只判断成品新增的裁切或镜头遮挡，不得推想原图不存在的头顶、身体或文字。"
+	text += PrimaryContentRule
+	if p.AnchorX != 0 {
+		text += "原图左右边缘本来截开的文字或物体属于原始构图；成品保留同样的半个字或局部轮廓就是完整，不能把原图缺少的笔画误报为镜头遮挡。先对照原图左右边界，再确认是否有摄像头实际覆盖原图已有笔画；文字在镜头下方或侧方且仅沿壳边截断时，不得称为镜头遮挡。问题须指出具体哪一字或哪一主体、哪部分新增缺失，避免仅以‘标题左侧’等笼统位置判定。"
+	}
 	if p.KeepWhole {
 		text += "用户已选择保留整幅画面，接受边缘留白，不强制贴壳边或贴底；原图外框作为完整画面保留，不把正常留白判成截边悬空。所有内容仍须留在壳边与画面内，重要文字、主脸和主头部避镜头，不得通过裁背景或拉伸来满铺。"
 	}
@@ -62,7 +75,9 @@ func (p Placement) Description() string {
 	if p.SourceAlphaGuide {
 		text += "原图参考中左幅Art是原图画布与实际比例，右幅Alpha guide仅增强透明度轮廓，不代表实际印刷颜色，也不是成品；按右幅确认浅色主头部轮廓，再对照各成品检查镜头遮挡。"
 	}
-	if p.DiagnosticFirstView {
+	if p.DiagnosticViews {
+		text += "成品附图是同一画布版本的评审诊断投影：弱alpha轮廓增强为品红，已确认的模板可临时隐藏手指层；正式导出仍保持原场景与颜色。只判断原图重要内容的照片裁切和镜头遮挡，不评诊断色或诊断图真实性，不因手指/挂绳自然遮挡调整印刷版位。"
+	} else if p.DiagnosticFirstView {
 		text += "首个成品角度为同一实际摆放的Alpha可见性诊断：只将弱 alpha 轮廓增强为品红，原本不透明的正文、眼睛和底色保留原色；其余角度为原色成品。该诊断只检查镜头遮挡，不评配色，不能将增强色判成素材变色。"
 	}
 	if p.FullBleed || p.FillTop {
@@ -190,7 +205,7 @@ func Choose(cfg Config, cands []Candidate, patternName string, placement Placeme
 	if timeout <= 0 {
 		timeout = 180 * time.Second
 	}
-	resp, err := DoVisionRequest(req, timeout)
+	resp, err := DoVisionRequest(req, timeout, cfg.BeforeRequest)
 	if err != nil {
 		return fallback(len(cands), err)
 	}

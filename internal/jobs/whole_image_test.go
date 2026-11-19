@@ -128,6 +128,7 @@ func TestWholeImagePolicySurvivesPlanningQueueAndRendersWithoutEdgeAnchors(t *te
 	def := cfg.Default()
 	jc := judge.Config{BaseURL: server.URL, Model: "fixture", Timeout: time.Second, MaxTokens: 100}
 	e.processOne(context.Background(), opt, def, jc, restored, opt.OutputDir, 1, 1)
+	// 只评审一轮、每轮一张：共 1 次模型调用（不再有逐格复核）
 	if restored.Phase != PhaseDone || calls != 1 || len(ps.requests) != 1 {
 		t.Fatalf("whole-image task failed: phase=%s model=%d renders=%d", restored.Phase, calls, len(ps.requests))
 	}

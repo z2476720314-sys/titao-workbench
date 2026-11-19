@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -69,7 +70,7 @@ func completeToFiles(calls *atomic.Int32, phase Phase) func(*Engine, context.Con
 		e.updateTask(task, func(task *Task) {
 			task.Phase, task.Progress = phase, 100
 			task.Files = []string{p}
-			task.Message, task.JudgeNote = "生成 1 张（请人工复核）", "请人工复核"
+			task.Message, task.JudgeNote = "生成 1 张", "评审通过"
 		})
 		if phase == PhaseDone {
 			e.mu.Lock()
@@ -205,6 +206,87 @@ func TestCompletionNeverRecordsOtherPhases(t *testing.T) {
 	}
 }
 
+func TestUnapprovedExportsAreNotSkippedFromHistoryOrQueue(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprint(legacy), func(t *testing.T) {
+			e, _, _ := newTestEngine(t)
+			opt := completionInputs(t, e)
+			opt.Patterns, opt.Templates = opt.Patterns[:1], opt.Templates[:1]
+			var calls atomic.Int32
+			e.processFn = completeToFiles(&calls, PhaseDone)
+			startAndWait(t, e, opt)
+			task := e.Tasks()[0]
+			task.Message, task.JudgeNote = "生成 1 张（评审未通过，请人工复核）", "评审 48 分；请人工复核"
+			if err := SaveQueue(e.queuePath(), NewQueue(opt, []*Task{task})); err != nil {
+				t.Fatal(err)
+			}
+			if legacy {
+				rec, err := completionRecordOf(task)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := saveCompletions(e.completionPath(), &completionFile{Version: 1, Records: map[string]completionRecord{task.CompletionKey: rec}}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Remove(e.completionPath()); err != nil {
+					t.Fatal(err)
+				}
+				if err := e.recordCompletion(opt, e.store.Get(), task); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pending, err := e.Plan(opt)
+			if err != nil || len(pending) != 1 {
+				t.Fatalf("unapproved output skipped: pending=%d err=%v", len(pending), err)
+			}
+		})
+	}
+}
+
+func TestPassedReviewNoteDoesNotTriggerRetry(t *testing.T) {
+	e, _, _ := newTestEngine(t)
+	opt := completionInputs(t, e)
+	opt.Patterns, opt.Templates = opt.Patterns[:1], opt.Templates[:1]
+	var calls atomic.Int32
+	complete := completeToFiles(&calls, PhaseDone)
+	e.processFn = func(e *Engine, ctx context.Context, opt Options, def cfg.Config, jc judge.Config, task *Task, root string, seq, total int) {
+		complete(e, ctx, opt, def, jc, task, root, seq, total)
+		task.JudgeNote = "评审95分：内容完整，无需人工复核"
+	}
+	startAndWait(t, e, opt)
+	pending, err := e.Plan(opt)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("passed negative wording caused rerun: pending=%d err=%v", len(pending), err)
+	}
+}
+
+func TestResumeStrictQueueRechecksOldPrintPositions(t *testing.T) {
+	e, _, _ := newTestEngine(t)
+	opt := completionInputs(t, e)
+	opt.NoCrop = true
+	opt.Patterns = opt.Patterns[:2]
+	opt.Templates = opt.Templates[:1]
+	tasks, err := Plan(opt, e.store.Get())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks[0].Phase = PhaseDone
+	tasks[0].CompletionKey = "old-independent-angle-layout"
+	if err := SaveQueue(e.queuePath(), NewQueue(opt, tasks)); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	e.processFn = completeToFiles(&calls, PhaseDone)
+	if err := e.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "resumed strict layout", func() bool { return !e.IsRunning() })
+	if calls.Load() != 2 {
+		t.Fatalf("old angle-specific layout skipped: calls=%d", calls.Load())
+	}
+}
+
 func TestCorruptCompletionBlocksStartWithoutOverwritingQueue(t *testing.T) {
 	e, _, _ := newTestEngine(t)
 	opt := completionInputs(t, e)
@@ -232,7 +314,7 @@ func TestCorruptCompletionBlocksStartWithoutOverwritingQueue(t *testing.T) {
 	}
 }
 
-func TestLegacyQueueSeedsOnlyUnchangedExportedInputs(t *testing.T) {
+func TestLegacyQueueWithoutPrintCanvasAlwaysRechecks(t *testing.T) {
 	for _, change := range []string{"unchanged", "new_pattern", "new_template", "missing_output", "different_placement", "different_output"} {
 		t.Run(change, func(t *testing.T) {
 			e, _, _ := newTestEngine(t)
@@ -258,7 +340,7 @@ func TestLegacyQueueSeedsOnlyUnchangedExportedInputs(t *testing.T) {
 			if err := os.Chtimes(out, outputTime, outputTime); err != nil {
 				t.Fatal(err)
 			}
-			tasks[0].Phase, tasks[0].Files, tasks[0].JudgeNote = PhaseDone, []string{out}, "请人工复核"
+			tasks[0].Phase, tasks[0].Files, tasks[0].JudgeNote = PhaseDone, []string{out}, "评审通过"
 			if err := SaveQueue(e.queuePath(), NewQueue(opt, tasks)); err != nil {
 				t.Fatal(err)
 			}
@@ -286,9 +368,6 @@ func TestLegacyQueueSeedsOnlyUnchangedExportedInputs(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := 1
-			if change == "unchanged" {
-				want = 0
-			}
 			if len(pending) != want {
 				t.Fatalf("legacy %s: pending=%d want=%d", change, len(pending), want)
 			}
@@ -297,9 +376,16 @@ func TestLegacyQueueSeedsOnlyUnchangedExportedInputs(t *testing.T) {
 				t.Fatal("planning changed real queue state")
 			}
 			if change == "unchanged" {
-				data, err := os.ReadFile(e.completionPath())
-				if err != nil || !strings.Contains(string(data), "人工复核") {
-					t.Fatalf("warning not retained: %s %v", data, err)
+				history, err := loadCompletions(e.completionPath())
+				if err != nil {
+					t.Fatal(err)
+				}
+				key, err := completionKey(opt, e.store.Get(), tasks[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, exists := history.Records[key]; exists {
+					t.Fatal("legacy history was incorrectly qualified as current print canvas")
 				}
 			}
 		})
@@ -393,7 +479,7 @@ func TestCompletionOutputReplacementDoesNotReuseOldRecord(t *testing.T) {
 	}
 }
 
-func TestClearQueuePreservesLegacyCompletions(t *testing.T) {
+func TestClearQueuePreservesLegacyHistoryWithoutClaimingCurrentCanvas(t *testing.T) {
 	e, _, _ := newTestEngine(t)
 	opt := completionInputs(t, e)
 	opt.Patterns, opt.Templates = opt.Patterns[:1], opt.Templates[:1]
@@ -419,8 +505,12 @@ func TestClearQueuePreservesLegacyCompletions(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, err := e.Plan(opt)
-	if err != nil || len(pending) != 0 {
-		t.Fatalf("clearing queue lost completed history: %d %v", len(pending), err)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("legacy layout must be rechecked: %d %v", len(pending), err)
+	}
+	history, err := loadCompletions(e.completionPath())
+	if err != nil || len(history.Records) != 1 {
+		t.Fatalf("clearing queue lost legacy history: %v %v", history, err)
 	}
 	if _, err := os.Stat(out); err != nil {
 		t.Fatal(err)
@@ -533,7 +623,13 @@ func TestCompletionRecognizesStrippedOutputDirectory(t *testing.T) {
 				}
 				tasks[0].Files = append(tasks[0].Files, p)
 			}
-			tasks[0].Phase, tasks[0].Message = PhaseDone, "生成7张，请人工复核"
+			tasks[0].Phase, tasks[0].Message = PhaseDone, "生成7张"
+			canvasData := []byte("frozen print-canvas artifact")
+			tasks[0].CanvasPath = filepath.Join(old, "print_canvas.png")
+			tasks[0].CanvasSHA256 = fmt.Sprintf("%x", sha256.Sum256(canvasData))
+			if err := os.WriteFile(tasks[0].CanvasPath, canvasData, 0600); err != nil {
+				t.Fatal(err)
+			}
 			past := time.Now().Add(-time.Hour)
 			for _, p := range []string{pattern, opt.Templates[0]} {
 				if err := os.Chtimes(p, past, past); err != nil {

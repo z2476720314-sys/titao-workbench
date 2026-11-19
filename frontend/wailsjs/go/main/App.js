@@ -6,10 +6,6 @@ export function AppVersion() {
   return window['go']['main']['App']['AppVersion']();
 }
 
-export function CancelRun() {
-  return window['go']['main']['App']['CancelRun']();
-}
-
 export function CheckPhotoshop() {
   return window['go']['main']['App']['CheckPhotoshop']();
 }

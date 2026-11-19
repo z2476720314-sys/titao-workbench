@@ -9,8 +9,6 @@ import {cfg} from '../models';
 
 export function AppVersion():Promise<string>;
 
-export function CancelRun():Promise<void>;
-
 export function CheckPhotoshop():Promise<main.PSStatus>;
 
 export function CheckUpdate():Promise<main.UpdateInfo>;

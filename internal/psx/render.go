@@ -1,9 +1,16 @@
 package psx
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
+	"math"
+	"os"
 	"strings"
 )
 
@@ -23,6 +30,8 @@ const (
 
 // RenderRequest 描述一次「按多档缩放渲染整幅拼合图」的请求。
 type RenderRequest struct {
+	// Canvas is a frozen print artifact; projection must not lay out Pattern again.
+	Canvas *PrintCanvas
 	// TemplateCopy 是模板的临时副本路径。原始模板永不被 PS 打开。
 	TemplateCopy string
 	// Pattern 是规范化后的图案路径（已去掉 dpi 元数据）。
@@ -36,10 +45,12 @@ type RenderRequest struct {
 	// OffsetX / OffsetY 占画布宽/高的比例，以居中为基准。
 	OffsetX float64
 	OffsetY float64
+	// StretchY carries the current canonical aspect into a later tuning proposal.
+	StretchY float64
 	// OutDir 是拼合图输出目录，脚本会写入 flat_0.png…flat_N.png。
 	OutDir string
 	// NoCrop 要求图案内容同时不被壳边和最终照片画面裁掉。
-	// 当前仅 PhotoCraft 提供校准及实际摆放元数据；Photoshop 在开工前明确拒绝。
+	// 冻结 Canvas 时只校验印刷域；未冻结的 Photoshop 请求仍拒绝。
 	NoCrop bool
 	// DiagnosticAlpha exports a magenta visibility copy using the same strict placement.
 	DiagnosticAlpha bool
@@ -73,8 +84,62 @@ func (r RenderRequest) MetadataPath(i int) string {
 }
 
 type RenderMetadata struct {
-	FrameVerified bool               `json:"frame_verified"`
-	Placements    []AppliedPlacement `json:"placements"`
+	ReviewQuarterTurns map[int]int        `json:"review_quarter_turns,omitempty"`
+	CanvasSHA256       string             `json:"canvas_sha256,omitempty"`
+	CanvasWidth        int                `json:"canvas_width,omitempty"`
+	CanvasHeight       int                `json:"canvas_height,omitempty"`
+	CanvasVerified     bool               `json:"canvas_verified,omitempty"`
+	StaticCells        []int              `json:"static_cells,omitempty"`
+	FrameVerified      bool               `json:"frame_verified"`
+	Placements         []AppliedPlacement `json:"placements"`
+}
+
+type PrintCanvas struct {
+	Path          string `json:"-"`
+	SHA256        string `json:"sha256"`
+	SourceSHA256  string `json:"source_sha256"`
+	Width, Height int
+	Placement     AppliedPlacement
+	Verified      bool
+}
+
+// Validate checks the complete canonical PNG and its placement evidence.
+func (c *PrintCanvas) Validate() error {
+	_, _, err := c.validatedPNG()
+	return err
+}
+
+func (c *PrintCanvas) validatedPNG() ([]byte, image.Image, error) {
+	validSHA := func(value string) bool {
+		decoded, err := hex.DecodeString(value)
+		return err == nil && len(decoded) == sha256.Size
+	}
+	if c == nil || strings.TrimSpace(c.Path) == "" || c.Width != 945 || c.Height != 1890 || !validSHA(c.SHA256) || !validSHA(c.SourceSHA256) {
+		return nil, nil, fmt.Errorf("invalid canonical print canvas evidence")
+	}
+	p := c.Placement
+	if p.Scale <= 0 || math.IsNaN(p.Scale) || math.IsInf(p.Scale, 0) || math.IsNaN(p.OffsetX) || math.IsInf(p.OffsetX, 0) || math.IsNaN(p.OffsetY) || math.IsInf(p.OffsetY, 0) || !p.ValidStretch() || (p.AnchorImpossible && !p.AnchorUnmet) {
+		return nil, nil, fmt.Errorf("invalid print placement evidence")
+	}
+	data, err := os.ReadFile(c.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(data)) != c.SHA256 {
+		return nil, nil, fmt.Errorf("print canvas SHA256 mismatch")
+	}
+	im, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode print canvas: %w", err)
+	}
+	if im.Bounds().Dx() != c.Width || im.Bounds().Dy() != c.Height {
+		return nil, nil, fmt.Errorf("print canvas decoded dimensions mismatch")
+	}
+	return data, im, nil
+}
+
+func (r RenderRequest) PrintCanvasPath(i int) string {
+	return fmt.Sprintf("%s/print_canvas_%d.png", strings.ReplaceAll(r.OutDir, "\\", "/"), i)
 }
 
 // TemplateInfo 是模板的结构探查结果。
@@ -404,8 +469,16 @@ const jsxRender = `(function(){
 var ErrStrictNoCropUnsupported = errors.New("Photoshop 尚不支持最终照片画面的严格不裁切校验；请在设置中将渲染器切换为 PhotoCraft 后重试")
 
 func (s *Session) Render(req RenderRequest) (string, error) {
-	if req.NoCrop {
+	if req.NoCrop && req.Canvas == nil {
 		return "", ErrStrictNoCropUnsupported
+	}
+	var frozenJSX string
+	if req.Canvas != nil {
+		var err error
+		frozenJSX, err = frozenRenderJSX(req)
+		if err != nil {
+			return "", err
+		}
 	}
 	// 版本自适应前置校验：先把「这个 PS 到底能不能跑」问清楚，
 	// 再决定要不要开模板。缺能力时立刻返回中文错误，好过脚本报 8800 或挂死。
@@ -419,6 +492,9 @@ func (s *Session) Render(req RenderRequest) (string, error) {
 	caps := For(ver)
 	if err := caps.Check(); err != nil {
 		return "", err
+	}
+	if req.Canvas != nil {
+		return s.runRenderJSX(req, frozenJSX)
 	}
 
 	scales, err := json.Marshal(req.Scales)
@@ -444,8 +520,12 @@ func (s *Session) Render(req RenderRequest) (string, error) {
 	bottom := req.AlignBottom && (req.Fit == "" || req.Fit == FitAuto || req.Fit == FitContain)
 	jsx = strings.ReplaceAll(jsx, "__BOTTOM__", fmt.Sprintf("%t", bottom))
 
+	return s.runRenderJSX(req, jsx)
+}
+
+func (s *Session) runRenderJSX(req RenderRequest, jsx string) (string, error) {
 	var log string
-	err = s.Do(func(c *Conn) error {
+	err := s.Do(func(c *Conn) error {
 		out, err := c.DoJavaScript(jsx)
 		log = out
 		return err
@@ -462,6 +542,159 @@ func (s *Session) Render(req RenderRequest) (string, error) {
 	}
 	return log, nil
 }
+
+func frozenRenderJSX(req RenderRequest) (string, error) {
+	data, im, err := req.Canvas.validatedPNG()
+	if err != nil {
+		return "", err
+	}
+	if req.NoCrop && !req.Canvas.Verified {
+		return "", fmt.Errorf("冻结印刷画布未通过印刷域不裁切校验")
+	}
+	if len(req.Scales) == 0 || strings.TrimSpace(req.OutDir) == "" {
+		return "", fmt.Errorf("冻结印刷画布缺少输出档位或目录")
+	}
+	// Native Place scales/centers visible pixels; restore the canonical alpha box.
+	box := image.Rectangle{}
+	for y := 0; y < im.Bounds().Dy(); y++ {
+		for x := 0; x < im.Bounds().Dx(); x++ {
+			_, _, _, a := im.At(x, y).RGBA()
+			if a != 0 {
+				box = box.Union(image.Rect(x, y, x+1, y+1))
+			}
+		}
+	}
+	if box.Empty() {
+		return "", fmt.Errorf("冻结印刷画布没有可见图案")
+	}
+	if err := os.MkdirAll(req.OutDir, 0755); err != nil {
+		return "", err
+	}
+	paths := make([]string, len(req.Scales))
+	for i := range paths {
+		paths[i] = req.PrintCanvasPath(i)
+		if err := os.WriteFile(paths[i], data, 0600); err != nil {
+			return "", fmt.Errorf("复制冻结印刷画布: %w", err)
+		}
+	}
+	config := struct {
+		Template, Group, OutDir string
+		Paths                   []string
+		Box                     [4]int
+		CellSize                int
+		Metadata                RenderMetadata
+	}{req.TemplateCopy, req.Group, strings.ReplaceAll(req.OutDir, "\\", "/"), paths, [4]int{box.Min.X, box.Min.Y, box.Max.X, box.Max.Y}, req.CellSize,
+		RenderMetadata{CanvasSHA256: req.Canvas.SHA256, CanvasWidth: req.Canvas.Width, CanvasHeight: req.Canvas.Height, CanvasVerified: req.Canvas.Verified, Placements: []AppliedPlacement{req.Canvas.Placement}}}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		return "", fmt.Errorf("序列化冻结印刷画布: %w", err)
+	}
+	return strings.ReplaceAll(jsxFrozenRender, "__CONFIG__", string(encoded)), nil
+}
+
+const jsxFrozenRender = `(function(){
+  var C = __CONFIG__, log = [], doc = null, inner = null, dup = null;
+  try {
+    var existing = {};
+    for (var ei = 0; ei < app.documents.length; ei++) existing["$" + app.documents[ei].id] = true;
+    var opened = app.open(new File(C.Template));
+    if (existing["$" + opened.id]) throw new Error("template copy is already open");
+    doc = opened;
+    app.activeDocument = doc;
+    var cw = doc.width.as("px"), ch = doc.height.as("px");
+    var cellSize = C.CellSize > 0 ? C.CellSize : cw;
+    if (cw != cellSize || ch % cellSize != 0) throw new Error("unsupported photo cell geometry");
+    var rows = ch / cellSize, scanRoot = null, sources = {}, order = [], cells = {};
+    for (var g = 0; g < doc.layers.length; g++) {
+      if (doc.layers[g].typename == "LayerSet" && doc.layers[g].name == C.Group) { scanRoot = doc.layers[g]; break; }
+    }
+    if (!scanRoot) return "NOGROUP " + C.Group;
+    function openContents(layer) {
+      app.activeDocument = doc; doc.activeLayer = layer;
+      executeAction(stringIDToTypeID("placedLayerEditContents"), new ActionDescriptor(), DialogModes.NO);
+      var opened = app.activeDocument;
+      if (opened == doc) throw new Error("smart object did not open");
+      if (existing["$" + opened.id]) throw new Error("smart object content is already open");
+      inner = opened;
+    }
+    function closeContents() {
+      inner.close(SaveOptions.DONOTSAVECHANGES); inner = null; app.activeDocument = doc;
+    }
+    function collect(container) {
+      if (!container.visible) return;
+      for (var i = 0; i < container.layers.length; i++) {
+        var L = container.layers[i];
+        if (!L.visible) continue;
+        if (L.typename == "LayerSet") { collect(L); continue; }
+        if (L.kind != LayerKind.SMARTOBJECT) continue;
+        var b = L.bounds, top = b[1].as("px"), bottom = b[3].as("px");
+        var cell = Math.floor((top + bottom) / (2 * cellSize));
+        if (!isFinite(top) || !isFinite(bottom) || bottom <= top || cell < 0 || cell >= rows || top < cell * cellSize - 1 || bottom > (cell+1) * cellSize + 1) throw new Error("ambiguous smart object photo cell");
+        app.activeDocument = doc; doc.activeLayer = L;
+        var ref = new ActionReference();
+        ref.putEnumerated(charIDToTypeID("Lyr "), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
+        var so = executeActionGet(ref).getObjectValue(stringIDToTypeID("smartObject"));
+        if (so.hasKey(stringIDToTypeID("linked")) && so.getBoolean(stringIDToTypeID("linked"))) throw new Error("linked smart object source is not an isolated template copy");
+        openContents(L);
+        var name = String(inner.name), path = String(inner.fullName.fsName);
+        if (!path) throw new Error("cannot identify embedded smart object source");
+        var key = "$" + path;
+        closeContents();
+        if (!sources[key]) { sources[key] = { name: name, layer: L }; order.push(key); }
+        cells[cell] = true;
+      }
+    }
+    collect(scanRoot);
+    if (!order.length) throw new Error("no visible smart objects in target group");
+    var base = C.Metadata.placements[0], placements = [], staticCells = [];
+    function placementJSON(cell) {
+      return '{"Scale":' + base.Scale + ',"OffsetX":' + base.OffsetX + ',"OffsetY":' + base.OffsetY + ',"Cell":' + cell + ',"Constrained":' + base.Constrained + ',"AnchorUnmet":' + base.AnchorUnmet + ',"AnchorImpossible":' + base.AnchorImpossible + '}';
+    }
+    for (var ci = 0; ci < rows; ci++) {
+      if (cells[ci]) placements.push(placementJSON(ci)); else staticCells.push(ci);
+    }
+    var metadata = '{"canvas_sha256":"' + C.Metadata.canvas_sha256 + '","canvas_width":945,"canvas_height":1890,"canvas_verified":' + !!C.Metadata.canvas_verified + ',"frame_verified":false,"placements":[' + placements.join(",") + '],"static_cells":[' + staticCells.join(",") + ']}';
+    for (var si = 0; si < C.Paths.length; si++) {
+      for (var oi = 0; oi < order.length; oi++) {
+        var source = sources[order[oi]];
+        openContents(source.layer);
+        var iw = inner.width.as("px"), ih = inner.height.as("px"), map;
+        if (iw == 946 && ih == 1890) map = 1;
+        else if (iw > 0 && ih > 0 && Math.abs(iw * 1890 - ih * 945) < 0.000001) map = ih / 1890;
+        else throw new Error("unsupported canonical canvas mapping: " + iw + "x" + ih);
+        for (var li = 0; li < inner.layers.length; li++) inner.layers[li].visible = false;
+        var d = new ActionDescriptor();
+        d.putPath(charIDToTypeID("null"), new File(C.Paths[si]));
+        d.putEnumerated(charIDToTypeID("FTcs"), charIDToTypeID("QCSt"), charIDToTypeID("Qcsa"));
+        executeAction(charIDToTypeID("Plc "), d, DialogModes.NO);
+        var nl = inner.activeLayer, b = nl.bounds;
+        var pw = b[2].as("px") - b[0].as("px"), ph = b[3].as("px") - b[1].as("px");
+        if (!(pw > 0 && ph > 0)) throw new Error("empty placed print canvas");
+        nl.resize((C.Box[2]-C.Box[0])*map/pw*100, (C.Box[3]-C.Box[1])*map/ph*100, AnchorPosition.MIDDLECENTER);
+        b = nl.bounds;
+        nl.translate(new UnitValue(C.Box[0]*map-b[0].as("px"), "px"), new UnitValue(C.Box[1]*map-b[1].as("px"), "px"));
+        inner.save(); closeContents();
+        log.push("FILL " + source.name + " frozen=" + C.Metadata.canvas_sha256);
+      }
+      app.activeDocument = doc;
+      dup = doc.duplicate("titao_flat"); dup.flatten();
+      dup.saveAs(new File(C.OutDir + "/flat_" + si + ".png"), new PNGSaveOptions(), true, Extension.LOWERCASE);
+      dup.close(SaveOptions.DONOTSAVECHANGES); dup = null; app.activeDocument = doc;
+      var receipt = new File(C.OutDir + "/placement_" + si + ".json");
+      receipt.encoding = "BINARY";
+      if (!receipt.open("w")) throw new Error("cannot write placement evidence");
+      var wrote = receipt.write(metadata), closed = receipt.close();
+      if (!wrote || !closed) throw new Error("cannot finish placement evidence");
+      log.push("FLAT frozen -> flat_" + si + ".png");
+    }
+  } catch (e) { log.push("ERR frozen " + e.message); }
+  finally {
+    if (dup) try { dup.close(SaveOptions.DONOTSAVECHANGES); } catch (e) {}
+    if (inner && inner != doc) try { inner.close(SaveOptions.DONOTSAVECHANGES); } catch (e) {}
+    if (doc) try { doc.close(SaveOptions.DONOTSAVECHANGES); } catch (e) {}
+  }
+  return log.join("\n");
+})()`
 
 // checkRenderLog 检查 JSX 的日志里是否藏着替换失败。
 //

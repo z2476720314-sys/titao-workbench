@@ -363,14 +363,7 @@ func (a *App) StartRun(opt jobs.Options) error {
 	return a.eng.Start(opt)
 }
 
-// CancelRun 停止当前运行（旧入口，等价于 StopRun）。
-func (a *App) CancelRun() {
-	if a.eng != nil {
-		a.eng.Cancel()
-	}
-}
-
-// PauseRun 暂停当前运行：当前这组做完就停在组边界。
+// PauseRun 暂停当前运行：当前不可中断操作返回后停住。
 func (a *App) PauseRun() error {
 	if a.eng == nil {
 		return fmt.Errorf("引擎未初始化")
@@ -396,7 +389,7 @@ func (a *App) ResumeRun() error {
 	return a.eng.Resume()
 }
 
-// StopRun 停止当前运行：当前这组做完就收尾，未执行的组标 canceled。
+// StopRun 取消尚未发布的套图；已经进入的整套发布事务完整收尾。
 func (a *App) StopRun() error {
 	if a.eng == nil {
 		return fmt.Errorf("引擎未初始化")
