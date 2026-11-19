@@ -220,3 +220,67 @@ func TestReviewCellsKeepsFirstMiddleLastAnglesReadable(t *testing.T) {
 		}
 	}
 }
+
+// 判据：只有出现「竖直或水平的直线切口」才需要贴边。
+// 左右都被切开时必须同时贴边（AnchorX=2），不能因为一侧切线稍弱就只贴一侧——
+// 真实素材里右侧被切断的字母常常只占半条边（实测分数 0.1379，旧阈值 0.15 漏判）。
+func TestBothVerticalCutsRequireBothSidesAnchored(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "cut.png"), filepath.Join(dir, "cut.out.png")
+	const w, h = 400, 800
+	im := image.NewNRGBA(image.Rect(0, 0, w, h))
+	fill := color.NRGBA{20, 30, 40, 255}
+	// 左右两侧各画一条紧贴边缘、贯穿大半高度的竖直色块：
+	// 左边更饱满（约 90% 高度），右边只有一半（约 45%），模拟字母被切掉一半的情形。
+	draw.Draw(im, image.Rect(0, 40, 30, 760), image.NewUniform(fill), image.Point{}, draw.Src)
+	draw.Draw(im, image.Rect(w-18, 200, w, 560), image.NewUniform(fill), image.Point{}, draw.Src)
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, im); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	got, err := Normalize(src, dst, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AnchorX != 2 {
+		t.Fatalf("左右都有竖直切口时必须贴两边，实际 AnchorX=%d", got.AnchorX)
+	}
+}
+
+// 没有笔直切口（自然弧边）的图案不应被要求贴边。
+func TestRoundedEdgesDoNotRequireAnchors(t *testing.T) {
+	dir := t.TempDir()
+	src, dst := filepath.Join(dir, "soft.png"), filepath.Join(dir, "soft.out.png")
+	im := image.NewNRGBA(image.Rect(0, 0, 300, 300))
+	// 圆形图案：边缘是弧线，没有笔直切线
+	draw.Draw(im, image.Rect(60, 60, 240, 240), image.NewUniform(color.NRGBA{200, 60, 60, 255}), image.Point{}, draw.Src)
+	for y := 0; y < 300; y++ {
+		for x := 0; x < 300; x++ {
+			dx, dy := float64(x-150), float64(y-150)
+			if dx*dx+dy*dy > 85*85 {
+				im.SetNRGBA(x, y, color.NRGBA{})
+			}
+		}
+	}
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := png.Encode(f, im); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	got, err := Normalize(src, dst, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AnchorX != 0 {
+		t.Fatalf("自然弧边不应要求贴边，实际 AnchorX=%d", got.AnchorX)
+	}
+}

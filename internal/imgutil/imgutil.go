@@ -233,17 +233,23 @@ func cutEdgeAnchors(img *image.NRGBA) (int, int) {
 		bottom = bandScore(image.Pt(b.Min.X, b.Max.Y-1), image.Pt(1, 0), image.Pt(0, -1), b.Dx(), b.Dy())
 	}
 	x, y := 0, 0
-	// The camera end remains free when both vertical cuts are equally strong.
-	if max(left, right) >= .15 {
+	// 判据：某一侧出现「竖直或水平的直线切口」就该贴那一侧。
+	// 之前的阈值 0.15 要求切线连续贯穿整条边，右侧被切断的字母往往
+	// 只占一半左右（实测 0.1379），于是左右都切开的图案只判出一侧。
+	// 现在降低到 0.10：只要够一条直线切口就认，但同侧仍要求逐层稳定，
+	// 避免把自然弧边或零散点缀误判成切口。
+	const verticalCut, horizontalCut = .10, .12
+	if max(left, right) >= verticalCut {
 		x = -1
 		if right > left {
 			x = 1
 		}
-		if min(left, right) >= .15 {
+		// 两侧都有竖直切口时必须同时贴边，不能只贴切线更长的那一侧。
+		if min(left, right) >= verticalCut {
 			x = 2
 		}
 	}
-	if max(top, bottom) >= .2 {
+	if max(top, bottom) >= horizontalCut {
 		y = 1
 		if top > bottom {
 			y = -1
