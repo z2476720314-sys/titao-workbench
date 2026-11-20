@@ -151,10 +151,9 @@ func TestJointAdviceIdentityPreservesItsQualityDecision(t *testing.T) {
 	}
 }
 
-// Plan 不做 renderer 级别的绝对安全夹回，但遵守相对单步与构图下限：
-// 基准 0.2 已低于构图下限时不允许继续缩小，只保留位移。
+// 只夹住构图下限，位移范围和大倍率的实际边界交给 renderer。
 func TestJointPlanLeavesAbsoluteSafetyLimitsToRenderer(t *testing.T) {
-	for _, tc := range []struct{ scale, ratio, want float64 }{{0.2, 0.05, 0.2}, {2, 2, 4}} {
+	for _, tc := range []struct{ scale, ratio, want float64 }{{0.8, 0.55, 0.55}, {2, 2, 4}} {
 		adv := parseAdvice(fmt.Sprintf(`{"camera_clear":false,"good":false,"score":60,"problem":"调整","dx":1,"dy":-1,"scale_ratio":%g}`, tc.ratio))
 		scale, x, y, _, iterate := Plan(adv, tc.scale, 0.8, -0.7, 1)
 		if !iterate || math.Abs(scale-tc.want) > 1e-12 || x != 1.8 || y != -1.7 {

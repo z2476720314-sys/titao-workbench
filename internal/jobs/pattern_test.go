@@ -108,7 +108,7 @@ func TestRejectedPatternNoOpNeverBecomesSuccessfulExport(t *testing.T) {
 	}))
 	defer srv.Close()
 	e.processPattern(context.Background(), Options{Auto: true, NoCrop: true, Fit: "auto", Scales: []float64{1}, CellSize: 80, JPGQuality: 90, MaxRounds: 3}, cfg.Default(), judge.Config{BaseURL: srv.URL, Model: "fixture", MaxTokens: 512, Timeout: time.Second}, tasks, output, 1, 1)
-	if tasks[0].Phase != PhaseFailed || e.done != 0 || len(ps.requests) != 1 || len(tasks[0].Files) != 2 {
+	if tasks[0].Phase != PhaseFailed || e.done != 0 || len(ps.requests) != 2 || len(tasks[0].Files) != 2 || tasks[0].TuneHistory[1].Good || tasks[0].TuneHistory[1].CameraClear || !strings.Contains(tasks[0].JudgeNote, "贴底后仍有遮挡") {
 		t.Fatalf("low-score no-op passed or repeated: renders=%d task=%+v", len(ps.requests), tasks[0])
 	}
 }
@@ -151,7 +151,7 @@ func TestCanvasChangeInvalidatesAllTemplateCompletionRecords(t *testing.T) {
 	if err := os.MkdirAll(output, 0700); err != nil {
 		t.Fatal(err)
 	}
-	canvas, err := printcanvas.Build(tasks[0].Pattern, filepath.Join(output, "print_canvas.png"), psx.RenderRequest{NoCrop: true, Fit: "auto"}, 1)
+	canvas, err := printcanvas.Plan(tasks[0].Pattern, filepath.Join(output, "artwork_plan.json"), psx.RenderRequest{NoCrop: true, Fit: "auto"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestSharedPlannerIncludesCompletedSiblingWhenOneTemplatePending(t *testing.
 	if err := os.MkdirAll(output, 0700); err != nil {
 		t.Fatal(err)
 	}
-	canvas, err := printcanvas.Build(tasks[0].Pattern, filepath.Join(output, "print_canvas.png"), psx.RenderRequest{NoCrop: true, Fit: "auto"}, 1)
+	canvas, err := printcanvas.Plan(tasks[0].Pattern, filepath.Join(output, "artwork_plan.json"), psx.RenderRequest{NoCrop: true, Fit: "auto"}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

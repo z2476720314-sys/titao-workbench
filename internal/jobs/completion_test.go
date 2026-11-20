@@ -14,6 +14,8 @@ import (
 
 	"titao/internal/cfg"
 	"titao/internal/judge"
+	"titao/internal/printcanvas"
+	"titao/internal/psx"
 )
 
 func completionInputs(t *testing.T, e *Engine) Options {
@@ -630,6 +632,17 @@ func TestCompletionRecognizesStrippedOutputDirectory(t *testing.T) {
 			if err := os.WriteFile(tasks[0].CanvasPath, canvasData, 0600); err != nil {
 				t.Fatal(err)
 			}
+			if change != "legacy" {
+				inputs, _ := patternGroupInputs(t)
+				if err := copyFile(inputs[0].Pattern, pattern); err != nil {
+					t.Fatal(err)
+				}
+				plan, err := printcanvas.Plan(pattern, filepath.Join(old, "artwork_plan.json"), psx.RenderRequest{NoCrop: true}, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tasks[0].CanvasPath, tasks[0].CanvasSHA256 = plan.Path, plan.SHA256
+			}
 			past := time.Now().Add(-time.Hour)
 			for _, p := range []string{pattern, opt.Templates[0]} {
 				if err := os.Chtimes(p, past, past); err != nil {
@@ -667,7 +680,7 @@ func TestCompletionRecognizesStrippedOutputDirectory(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := 0
-			if change == "missing" || change == "escape" || change == "changed_metadata" {
+			if change == "legacy" || change == "missing" || change == "escape" || change == "changed_metadata" {
 				want = 1
 			}
 			if len(pending) != want {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -20,6 +21,8 @@ import (
 
 const Width = 945
 const Height = 1890
+
+var ErrEdgeStretchConflict = errors.New("直边修正需要的纵横相对比例")
 
 func Build(pattern, output string, req psx.RenderRequest, scale float64) (*psx.PrintCanvas, error) {
 	if err := validRequest(req, scale); err != nil {
@@ -44,95 +47,12 @@ func Build(pattern, output string, req psx.RenderRequest, scale float64) (*psx.P
 	if strings.EqualFold(sourcePath, outputPath) || (statErr == nil && os.SameFile(sourceInfo, outputInfo)) {
 		return nil, fmt.Errorf("print canvas must not overwrite its source")
 	}
-	data, err := os.ReadFile(pattern)
+	c, im, err := layout(pattern, req, scale, false)
 	if err != nil {
 		return nil, err
-	}
-	sourceSHA := sum(data)
-	im, err := imgutil.Decode(pattern)
-	if err != nil {
-		return nil, err
-	}
-	data, err = os.ReadFile(pattern)
-	if err != nil {
-		return nil, err
-	}
-	if sum(data) != sourceSHA {
-		return nil, fmt.Errorf("print source changed while decoding")
 	}
 	b := im.Bounds()
-	hull := psx.ArtworkHull(im)
-	if b.Empty() || len(hull) < 3 {
-		return nil, fmt.Errorf("empty print artwork")
-	}
-	base := math.Min(float64(Width)/float64(b.Dx()), float64(Height)/float64(b.Dy()))
-	var p psx.AppliedPlacement
-	var sx, sy, cx, cy float64
-	if req.NoCrop {
-		// Only anchor comparisons tolerate roundoff; source containment stays strict.
-		area := psx.VisibleArea{Polygon: []psx.Point{{0, 0}, {1, 0}, {1, 1}, {0, 1}}, EdgeTolerance: 1e-6}
-		fitAtRatio := func(ratio float64, preferOffsets bool) (psx.AppliedPlacement, error) {
-			virtualHeight := max(int(math.Ceil(float64(b.Dy())*psx.MinVerticalStretch)), min(int(math.Floor(float64(b.Dy())*psx.MaxVerticalStretch)), int(math.Round(float64(b.Dy())*ratio))))
-			virtualBase := math.Min(float64(Width)/float64(b.Dx()), float64(Height)/float64(virtualHeight))
-			result, err := psx.FitArtwork(area, hull, Width, Height, b.Dx(), virtualHeight, scale*base/virtualBase, req.OffsetX, req.OffsetY, req.AnchorX, req.AnchorY, preferOffsets)
-			result.Scale *= virtualBase / base
-			if virtualHeight != b.Dy() {
-				result.StretchY = float64(virtualHeight) / float64(b.Dy())
-				result.Constrained = true
-			}
-			return result, err
-		}
-		previousRatio := (psx.AppliedPlacement{StretchY: req.StretchY}).VerticalStretch()
-		p, err = fitAtRatio(previousRatio, req.PreferOffsets)
-		if err != nil {
-			return nil, err
-		}
-		if (req.PreferOffsets || p.AnchorImpossible) && (req.AnchorX == 2 || req.AnchorY == 2) {
-			low, high := hull[0], hull[0]
-			for _, point := range hull[1:] {
-				for axis := range low {
-					low[axis], high[axis] = math.Min(low[axis], point[axis]), math.Max(high[axis], point[axis])
-				}
-			}
-			fixedX := float64(Width) / ((high[0] - low[0]) * float64(b.Dx()))
-			fixedY := float64(Height) / ((high[1] - low[1]) * float64(b.Dy()))
-			ratio := base * scale * previousRatio / fixedX
-			if req.AnchorY == 2 {
-				ratio = fixedY / (base * scale)
-				if req.AnchorX == 2 {
-					ratio = fixedY / fixedX
-				}
-			}
-			adjusted, err := fitAtRatio(math.Max(.97, math.Min(1.03, ratio)), true)
-			if err != nil {
-				return nil, err
-			}
-			if !adjusted.AnchorUnmet {
-				p = adjusted
-			}
-		}
-		sx, sy = base*p.Scale, base*p.Scale*p.VerticalStretch()
-		cx, cy = (.5+p.OffsetX)*Width, (.5+p.OffsetY)*Height
-	} else {
-		p, sx, sy, cx, cy, err = manualPlacement(req, scale, b.Dx(), b.Dy())
-		if err != nil {
-			return nil, err
-		}
-	}
-	tx, ty := cx-float64(b.Dx())*sx/2, cy-float64(b.Dy())*sy/2
-	if !finite(sx) || !finite(sy) || sx <= 0 || sy <= 0 || !finite(tx) || !finite(ty) {
-		return nil, fmt.Errorf("nonfinite print transform")
-	}
-	verified := true
-	for _, point := range hull {
-		x, y := tx+point[0]*float64(b.Dx())*sx, ty+point[1]*float64(b.Dy())*sy
-		if !finite(x) || !finite(y) || x < -1e-5 || y < -1e-5 || x > Width+1e-5 || y > Height+1e-5 {
-			verified = false
-		}
-	}
-	if req.NoCrop && !verified {
-		return nil, fmt.Errorf("print placement leaves canonical domain")
-	}
+	sx, sy, tx, ty := c.Transform[0], c.Transform[3], c.Transform[4], c.Transform[5]
 	canvas := image.NewNRGBA(image.Rect(0, 0, Width, Height))
 	draw.BiLinear.Transform(canvas, f64.Aff3{sx, 0, tx - sx*float64(b.Min.X), 0, sy, ty - sy*float64(b.Min.Y)}, im, b, draw.Src, nil)
 	var encoded bytes.Buffer
@@ -158,10 +78,130 @@ func Build(pattern, output string, req psx.RenderRequest, scale float64) (*psx.P
 	if err := os.Rename(f.Name(), output); err != nil {
 		return nil, err
 	}
-	return &psx.PrintCanvas{Path: output, SHA256: sum(encoded.Bytes()), SourceSHA256: sourceSHA, Width: Width, Height: Height, Placement: p, Verified: verified}, nil
+	c.Path, c.SHA256 = output, sum(encoded.Bytes())
+	return c, nil
+}
+
+func layout(pattern string, req psx.RenderRequest, scale float64, direct bool) (*psx.PrintCanvas, image.Image, error) {
+	if err := validRequest(req, scale); err != nil {
+		return nil, nil, err
+	}
+	data, err := os.ReadFile(pattern)
+	if err != nil {
+		return nil, nil, err
+	}
+	sourceSHA := sum(data)
+	im, err := imgutil.Decode(pattern)
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err = os.ReadFile(pattern)
+	if err != nil {
+		return nil, nil, err
+	}
+	if sum(data) != sourceSHA {
+		return nil, nil, fmt.Errorf("print source changed while decoding")
+	}
+	b := im.Bounds()
+	hull := psx.ArtworkHull(im)
+	if b.Empty() || len(hull) < 3 {
+		return nil, nil, fmt.Errorf("empty print artwork")
+	}
+	base := math.Min(float64(Width)/float64(b.Dx()), float64(Height)/float64(b.Dy()))
+	if direct && (req.Fit == "" || req.Fit == psx.FitAuto || req.Fit == psx.FitNone) {
+		base = 1
+	}
+	var p psx.AppliedPlacement
+	var sx, sy, cx, cy float64
+	if req.NoCrop {
+		// Only anchor comparisons tolerate roundoff; source containment stays strict.
+		area := psx.VisibleArea{Polygon: []psx.Point{{0, 0}, {1, 0}, {1, 1}, {0, 1}}, EdgeTolerance: 1e-6}
+		fitAtRatio := func(ratio float64, preferOffsets bool, targetScale float64) (psx.AppliedPlacement, error) {
+			virtualHeight := int(math.Ceil(float64(b.Dy()) * ratio))
+			virtualHull := append([]psx.Point(nil), hull...)
+			for i := range virtualHull {
+				// Preserve the exact fractional aspect inside integer source dimensions.
+				virtualHull[i][1] = .5 + (hull[i][1]-.5)*float64(b.Dy())*ratio/float64(virtualHeight)
+			}
+			virtualBase := math.Min(float64(Width)/float64(b.Dx()), float64(Height)/float64(virtualHeight))
+			result, err := psx.FitArtwork(area, virtualHull, Width, Height, b.Dx(), virtualHeight, targetScale*base/virtualBase, req.OffsetX, req.OffsetY, req.AnchorX, req.AnchorY, preferOffsets)
+			result.Scale *= virtualBase / base
+			if ratio != 1 {
+				result.StretchY = ratio
+				result.Constrained = true
+			}
+			return result, err
+		}
+		previousRatio := (psx.AppliedPlacement{StretchY: req.StretchY}).VerticalStretch()
+		p, err = fitAtRatio(previousRatio, req.PreferOffsets, scale)
+		if err != nil {
+			return nil, nil, err
+		}
+		if (direct || req.PreferOffsets || p.AnchorImpossible) && (req.AnchorX == 2 || req.AnchorY == 2) && (direct || previousRatio == 1 || p.AnchorUnmet) {
+			low, high := hull[0], hull[0]
+			for _, point := range hull[1:] {
+				for axis := range low {
+					low[axis], high[axis] = math.Min(low[axis], point[axis]), math.Max(high[axis], point[axis])
+				}
+			}
+			fixedX := float64(Width) / ((high[0] - low[0]) * float64(b.Dx()))
+			fixedY := float64(Height) / ((high[1] - low[1]) * float64(b.Dy()))
+			ratio := base * scale * previousRatio / fixedX
+			if req.AnchorY == 2 {
+				ratio = fixedY / (base * scale)
+				if req.AnchorX == 2 {
+					ratio = fixedY / fixedX
+				}
+			}
+			if (psx.AppliedPlacement{StretchY: ratio}).ValidStretch() {
+				targetScale := scale
+				if req.AnchorX == 2 {
+					targetScale = fixedX / base
+				}
+				adjusted, err := fitAtRatio(ratio, true, targetScale)
+				if err != nil {
+					return nil, nil, err
+				}
+				if !adjusted.AnchorUnmet {
+					adjusted.Constrained = adjusted.Constrained || math.Abs(adjusted.Scale-scale) > 1e-9
+					p = adjusted
+				}
+			} else if direct || req.PreferOffsets {
+				return nil, nil, fmt.Errorf("%w %.6g 超出允许范围 [%.2f, %.2f]，无法保持另一方向尺寸", ErrEdgeStretchConflict, ratio, psx.MinVerticalStretch, psx.MaxVerticalStretch)
+			}
+		}
+		sx, sy = base*p.Scale, base*p.Scale*p.VerticalStretch()
+		cx, cy = (.5+p.OffsetX)*Width, (.5+p.OffsetY)*Height
+	} else {
+		if direct && (req.Fit == "" || req.Fit == psx.FitAuto) {
+			req.Fit = psx.FitNone
+		}
+		p, sx, sy, cx, cy, err = manualPlacement(req, scale, b.Dx(), b.Dy())
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	tx, ty := cx-float64(b.Dx())*sx/2, cy-float64(b.Dy())*sy/2
+	if !finite(sx) || !finite(sy) || sx <= 0 || sy <= 0 || !finite(tx) || !finite(ty) {
+		return nil, nil, fmt.Errorf("nonfinite print transform")
+	}
+	verified := true
+	for _, point := range hull {
+		x, y := tx+point[0]*float64(b.Dx())*sx, ty+point[1]*float64(b.Dy())*sy
+		if !finite(x) || !finite(y) || x < -1e-5 || y < -1e-5 || x > Width+1e-5 || y > Height+1e-5 {
+			verified = false
+		}
+	}
+	if req.NoCrop && !verified {
+		return nil, nil, fmt.Errorf("print placement leaves canonical domain")
+	}
+	return &psx.PrintCanvas{SourceSHA256: sourceSHA, SourceWidth: b.Dx(), SourceHeight: b.Dy(), Width: Width, Height: Height, Placement: p, Verified: verified, Transform: [6]float64{sx, 0, 0, sy, tx, ty}}, im, nil
 }
 
 func Validate(canvas *psx.PrintCanvas) error {
+	if canvas != nil && canvas.Kind != "" {
+		return canvas.Validate()
+	}
 	if canvas == nil || strings.TrimSpace(canvas.Path) == "" || canvas.Width != Width || canvas.Height != Height || !validSHA(canvas.SHA256) || !validSHA(canvas.SourceSHA256) {
 		return fmt.Errorf("invalid canonical print canvas evidence")
 	}
@@ -219,11 +259,12 @@ func manualPlacement(req psx.RenderRequest, scale float64, pw, ph int) (psx.Appl
 	default:
 		bx, by = math.Min(bx, by), math.Min(bx, by)
 	}
-	sx, sy := bx*scale, by*scale
+	stretchY := (psx.AppliedPlacement{StretchY: req.StretchY}).VerticalStretch()
+	sx, sy := bx*scale, by*scale*stretchY
 	b := req.ContentBounds
 	if req.AnchorX == 2 && b != [4]float64{} {
 		sx = float64(Width) / (float64(pw) * (b[2] - b[0]))
-		sy = sx
+		stretchY = (sy / by) / (sx / bx)
 	}
 	w, h := float64(pw)*sx, float64(ph)*sy
 	cx, cy := float64(Width)/2, float64(Height)/2
@@ -253,8 +294,14 @@ func manualPlacement(req psx.RenderRequest, scale float64, pw, ph int) (psx.Appl
 			cy = math.Max(Height-h/2, math.Min(h/2, cy))
 		}
 	}
-	p := psx.AppliedPlacement{Scale: sx / bx, OffsetX: cx/Width - .5, OffsetY: cy/Height - .5}
-	if !finite(p.Scale) || p.Scale <= 0 || !finite(p.OffsetX) || !finite(p.OffsetY) || !finite(sy/by) || math.Abs(p.Scale-sy/by) > 1e-9*math.Max(p.Scale, sy/by) {
+	p := psx.AppliedPlacement{Scale: sx / bx, OffsetX: cx/Width - .5, OffsetY: cy/Height - .5, StretchY: req.StretchY}
+	if req.AnchorX == 2 && b != [4]float64{} {
+		p.StretchY = stretchY
+	}
+	if !p.ValidStretch() {
+		return p, 0, 0, 0, 0, fmt.Errorf("%w %.6g 超出允许范围 [%.2f, %.2f]，无法保持另一方向尺寸", ErrEdgeStretchConflict, p.VerticalStretch(), psx.MinVerticalStretch, psx.MaxVerticalStretch)
+	}
+	if !finite(p.Scale) || p.Scale <= 0 || !finite(p.OffsetX) || !finite(p.OffsetY) || !finite(sy/by) || math.Abs(p.Scale*stretchY-sy/by) > 1e-9*math.Max(p.Scale*stretchY, sy/by) {
 		return p, 0, 0, 0, 0, fmt.Errorf("unrepresentable manual print placement")
 	}
 	p.Constrained = math.Abs(p.Scale-scale) > 1e-9 || math.Abs(p.OffsetX-req.OffsetX) > 1e-9 || math.Abs(p.OffsetY-req.OffsetY) > 1e-9

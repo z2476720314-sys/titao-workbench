@@ -122,7 +122,7 @@ func serveLegacyMCPFixture() int {
 	}
 }
 
-func TestStandaloneRenderBuildsCanonicalCandidatesAndReportsActualPlacement(t *testing.T) {
+func TestStandaloneRenderDirectCandidatesReportPairedCutEdgeConstraints(t *testing.T) {
 	t.Setenv("PHOTOCRAFT_LEGACY_MCP_FIXTURE", "1")
 	dir := t.TempDir()
 	pattern := filepath.Join(dir, "pattern.png")
@@ -138,7 +138,7 @@ func TestStandaloneRenderBuildsCanonicalCandidatesAndReportsActualPlacement(t *t
 	if err := savePNG(pattern, im); err != nil {
 		t.Fatal(err)
 	}
-	req := psx.RenderRequest{TemplateCopy: filepath.Join(dir, "fixture.tif"), Pattern: pattern, Group: "插画", Fit: psx.FitCover, Scales: []float64{1, 1.2}, OffsetX: .3, OffsetY: .2, OutDir: dir, CellSize: 100}
+	req := psx.RenderRequest{TemplateCopy: filepath.Join(dir, "fixture.tif"), Pattern: pattern, Group: "插画", Fit: psx.FitCover, Scales: []float64{1, 1.1}, OffsetX: .3, OffsetY: .2, OutDir: dir, CellSize: 100}
 	if _, err := New(os.Args[0]).Render(req); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestStandaloneRenderBuildsCanonicalCandidatesAndReportsActualPlacement(t *t
 	if started == 0 || started != exited {
 		t.Fatal("private MCP did not exit before Render returned")
 	}
-	for index, wantOffset := range []float64{0, .1} {
+	for index := range req.Scales {
 		data, err := os.ReadFile(req.MetadataPath(index))
 		if err != nil {
 			t.Fatal(err)
@@ -178,11 +178,11 @@ func TestStandaloneRenderBuildsCanonicalCandidatesAndReportsActualPlacement(t *t
 			t.Fatalf("metadata=%+v", metadata)
 		}
 		for cell, p := range metadata.Placements {
-			if p.Cell != cell || p.Scale != req.Scales[index] || math.Abs(p.OffsetX-wantOffset) > 1e-12 || math.Abs(p.OffsetY-wantOffset) > 1e-12 {
+			if p.Cell != cell || p.Scale != 1 || math.Abs(p.VerticalStretch()-req.Scales[index]) > 1e-12 || math.Abs(p.OffsetX) > 1e-12 || math.Abs(p.OffsetY-(1-req.Scales[index])/2) > 1e-12 || !p.Constrained {
 				t.Fatalf("shared cell lost actual canonical placement: %+v", p)
 			}
 		}
-		artifact, err := os.ReadFile(req.PrintCanvasPath(index))
+		artifact, err := os.ReadFile(req.ArtworkPlanPath(index))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -63,7 +63,15 @@ func (p *reviewPhotoshop) Render(req psx.RenderRequest) (string, error) {
 			return "", closeErr
 		}
 		canvasPath := req.PrintCanvasPath(i)
-		if req.Canvas != nil {
+		if req.Canvas.IsDirect() {
+			canvasPath = req.ArtworkPlanPath(i)
+			if err := copyFile(req.Canvas.Path, canvasPath); err != nil {
+				return "", err
+			}
+			if err := copyFile(req.Canvas.SourcePath(), filepath.Join(req.OutDir, req.Canvas.SourceFile)); err != nil {
+				return "", err
+			}
+		} else if req.Canvas != nil {
 			if err := copyFile(req.Canvas.Path, canvasPath); err != nil {
 				return "", err
 			}
@@ -86,8 +94,16 @@ func (p *reviewPhotoshop) Render(req psx.RenderRequest) (string, error) {
 		}
 		ch := sha256.Sum256(cb)
 		meta := psx.RenderMetadata{FrameVerified: false, CanvasVerified: true, CanvasSHA256: hex.EncodeToString(ch[:]), CanvasWidth: printcanvas.Width, CanvasHeight: printcanvas.Height}
+		if req.Canvas.IsDirect() {
+			meta.ArtifactKind, meta.SourceSHA256, meta.Transform = req.Canvas.Kind, req.Canvas.SourceSHA256, req.Canvas.Transform
+			meta.CanvasVerified = req.Canvas.Verified
+		}
 		for cell := 0; cell < cells; cell++ {
 			meta.Placements = append(meta.Placements, psx.AppliedPlacement{Cell: cell, Scale: req.Scales[i], OffsetX: req.OffsetX, OffsetY: req.OffsetY, AnchorUnmet: cell == 0 && p.anchorUnmet, AnchorImpossible: cell == 0 && p.anchorImpossible})
+			if req.Canvas.IsDirect() {
+				meta.Placements[cell] = req.Canvas.Placement
+				meta.Placements[cell].Cell = cell
+			}
 			if p.clampFirstTwo && len(p.requests) <= 2 {
 				meta.Placements[cell].Scale, meta.Placements[cell].OffsetX, meta.Placements[cell].OffsetY = 1, 0, 0
 			}

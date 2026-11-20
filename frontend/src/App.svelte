@@ -40,7 +40,7 @@
   let group = '插画'
   let fit = 'auto'
   let auto = true
-  let trimAlpha = true
+  const trimAlpha = true
   let offsetX = 0
   let offsetY = 0
   let manualScale = ''
@@ -792,7 +792,7 @@
     outputDir = conf.output_dir || ''
     group = conf.group || '插画'
     fit = conf.fit || 'auto'
-    trimAlpha = conf.trim_alpha !== false
+    conf.trim_alpha = true
     noCrop = conf.no_crop !== false
     jpgQuality = conf.jpg_quality || 95
     cellSize = conf.cell_size || 800
@@ -854,8 +854,8 @@
   }
 
   const FIT_OPTS = [
-    { v: 'auto', label: 'auto · 原画布等比摆放（推荐）', hint: '以原比例为基准，必要时允许3%以内轻微比例调整，保留透明度和有效内容' },
-    { v: 'contain', label: 'contain · 完整放下', hint: '同 auto，显式指定' },
+    { v: 'auto', label: 'auto · 原始像素置入（推荐）', hint: '按原图尺寸置入现有智能对象，保留透明度；需要时受边界和切边贴合约束' },
+    { v: 'contain', label: 'contain · 完整放下', hint: '按图案内容完整放入智能对象' },
     { v: 'cover', label: 'cover · 铺满', hint: '以铺满为基准' },
     { v: 'stretch', label: 'stretch · 拉伸变形', hint: '关闭不裁切时允许改变宽高比' },
     { v: 'none', label: 'none · 原始像素', hint: '以原始像素为基准' },
@@ -1084,7 +1084,7 @@
               <span style="color:var(--text);font-size:12px">视觉模型自动判断图案大小</span>
             </label>
             <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-              同图本批所选模板共用 945×1890 印刷画布，从 1.0 开始；微调同步更新全组。
+              原图直接置入智能对象，从 1.0 开始；同图全套共用版位，微调同步更新。
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
@@ -1118,7 +1118,7 @@
                 <span class="lbl">手动档位（留空用配置）</span>
                 <input type="text" bind:value={manualScale} placeholder="例如 0.95,1.05,1.15" />
                 <div style="font-size:10.5px;color:var(--muted);margin-top:2px">
-                  手动模式使用第一档；1.0 = 完整放下的基准，不裁切保护印刷域内容。
+                  自动模式 1.0 为原图尺寸；手动模式使用第一档，倍率按所选摆放方式计算。
                 </div>
               </div>
               <div class="field">
@@ -1154,7 +1154,7 @@
             <div class="field" style="margin-bottom:0">
               <label class="check-row">
                 <input type="checkbox" bind:checked={noCrop} on:change={saveFormParams} />
-                <span style="color:var(--text);font-size:12px">印刷画布内不裁切</span>
+                <span style="color:var(--text);font-size:12px">保护图案完整</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
                 浅色和半透明内容也受保护；最终照片的文字、人物和主要物体整体仍需逐角检查裁切与镜头遮挡。
@@ -1162,13 +1162,8 @@
             </div>
 
             <div class="field" style="margin-bottom:0">
-              <label class="check-row">
-                <input type="checkbox" bind:checked={trimAlpha} on:change={saveFormParams} disabled={auto && (fit === 'auto' || fit === 'contain')} />
-                <span style="color:var(--text);font-size:12px">手动模式裁掉图案透明留白</span>
-              </label>
-              <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                自动模式保留原图画布；手动模式可裁掉四周全透明留白。
-              </div>
+              <span class="lbl">只复制图案内容</span>
+              <div style="font-size:10.5px;color:var(--muted)">自动去除外围全透明区域；图案内部的透明孔洞和半透明内容保留。</div>
             </div>
           </div>
         {/if}
@@ -1867,20 +1862,18 @@
           </div>
           <div class="grid-2" style="margin-top:var(--sp-md)">
             <div class="field" style="margin-bottom:0">
-              <label class="check-row">
-                <input type="checkbox" bind:checked={conf.trim_alpha} />
-                <span style="color:var(--text);font-size:12px">手动模式默认裁掉透明留白</span>
-              </label>
+              <span class="lbl">图案内容范围</span>
+              <div style="font-size:10.5px;color:var(--muted)">只去掉外围全透明边距，保留内部透明和所有有效像素。</div>
             </div>
             <div class="field" style="margin-bottom:0">
               <label class="check-row">
                 <input type="checkbox" bind:checked={conf.no_crop} />
-                <span style="color:var(--text);font-size:12px">默认印刷画布内不裁切</span>
+                <span style="color:var(--text);font-size:12px">默认保护图案完整</span>
               </label>
             </div>
           </div>
           <div style="font-size:10.5px;color:var(--muted);margin-top:6px;line-height:1.7">
-            不裁切保护印刷域内的有效内容和透明度；必要时允许3%以内轻微比例调整，主要图案的裁切与遮挡逐角评审。
+            保护有效内容和透明度；贴边微调比例0.90～1.12。镜头遮挡时只下移贴底，大小和比例不变。
           </div>
         </section>
 
@@ -1898,7 +1891,7 @@
                 <span style="color:var(--text);font-size:12px">启用多轮自动微调</span>
               </label>
               <div style="font-size:10.5px;color:var(--muted);margin-left:20px">
-                逐角评审本批所选模板；需要调整时更新同一画布，并重新渲染全组。
+                需要调整时更新同一版位，并重新置入原图、渲染全组。
               </div>
             </div>
             <div class="field">
@@ -1973,7 +1966,7 @@
         <div class="card-head"><div class="card-title">工作原理</div></div>
         <ol style="margin:0;padding-left:18px;font-size:12px;line-height:1.85;color:#c8cad0">
           <li>模板 TIF 复制到临时目录，<b>原文件永不打开或修改</b>。</li>
-          <li>同一图案在本批所选模板共用 945×1890 印刷画布，模板只投影。</li>
+          <li>原图直接置入模板原有智能对象，不先合成固定尺寸的透明画布；同图全套共用版位。</li>
           <li>逐角检查主字、主眼、头部裁切和镜头遮挡；微调后全组同步更新。</li>
           <li>明确截断边保持贴边；阶梯模板的两张静态照片保持原样，约束冲突保留人工复核。</li>
           <li>按每 <span class="mono">{cellSize}px</span> 一格切格，导出高质量 JPG。</li>
@@ -1985,13 +1978,13 @@
         <table>
           <thead><tr><th style="width:100px">t</th><th>效果</th></tr></thead>
           <tbody>
-            <tr><td class="mono">1.0</td><td>以完整放入共享印刷画布为基准</td></tr>
+            <tr><td class="mono">1.0</td><td>自动置入时为原图像素尺寸；手动模式按所选摆放方式计算</td></tr>
             <tr><td class="mono">&lt; 1.0</td><td>留白，图案变小</td></tr>
             <tr><td class="mono">&gt; 1.0</td><td>请求放大；开启不裁切时仍受印刷域内容边界限制</td></tr>
           </tbody>
         </table>
         <div style="margin-top:10px;font-size:11px;color:var(--muted);line-height:1.7">
-          印刷画布内完整，不代表最终照片没有裁切或遮挡。主字、主眼和头部仍需逐角评审；
+          智能对象内完整，不代表最终照片没有裁切或遮挡。主字、主眼和头部仍需评审；
           不能同时满足内容完整与贴边时会提示人工复核。
         </div>
       </section>

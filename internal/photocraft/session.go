@@ -255,9 +255,12 @@ func (s *Session) Render(req psx.RenderRequest) (string, error) {
 			return "", fmt.Errorf("套图倍率无效")
 		}
 	}
+	if req.Canvas == nil || req.Canvas.IsDirect() {
+		return s.renderDirect(req)
+	}
 	if req.Canvas != nil {
 		if err := printcanvas.Validate(req.Canvas); err != nil {
-			return "", fmt.Errorf("共享印刷画布无效: %w", err)
+			return "", fmt.Errorf("共享原图版位无效: %w", err)
 		}
 	}
 	inputs := []string{req.TemplateCopy}
@@ -383,19 +386,13 @@ func (s *Session) Render(req psx.RenderRequest) (string, error) {
 			return "", err
 		}
 	}
-	for i, scale := range req.Scales {
+	for i := range req.Scales {
 		canvas := req.Canvas
-		if canvas == nil {
-			canvas, err = printcanvas.Build(req.Pattern, req.PrintCanvasPath(i), req, scale)
-			if err != nil {
-				return "", err
-			}
-		}
 		if err = printcanvas.Validate(canvas); err != nil {
-			return "", fmt.Errorf("共享印刷画布无效: %w", err)
+			return "", fmt.Errorf("共享原图版位无效: %w", err)
 		}
 		if canvas.Width != printcanvas.Width || canvas.Height != printcanvas.Height {
-			return "", fmt.Errorf("共享印刷画布必须为 %dx%d", printcanvas.Width, printcanvas.Height)
+			return "", fmt.Errorf("共享原图版位必须为 %dx%d", printcanvas.Width, printcanvas.Height)
 		}
 		local := req.PrintCanvasPath(i)
 		if err = stageFile(canvas.Path, local); err != nil {
@@ -486,7 +483,7 @@ func (s *Session) Render(req psx.RenderRequest) (string, error) {
 			return "", err
 		}
 	}
-	return fmt.Sprintf("PhotoCraft: %d 个共享源投影至 %d 个印刷照片格，%d 个静态照片格，%d 档公共画布", len(surfaces), len(cells), len(static), len(req.Scales)), nil
+	return fmt.Sprintf("PhotoCraft: %d 个共享源投影至 %d 个印刷照片格，%d 个静态照片格，%d 档公共版位", len(surfaces), len(cells), len(static), len(req.Scales)), nil
 }
 
 func (s *Session) ProbeTemplate(path string) (*psx.TemplateInfo, error) {

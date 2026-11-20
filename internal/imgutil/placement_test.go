@@ -58,7 +58,7 @@ func TestCutEdgeAnchorsIgnoreNaturalContours(t *testing.T) {
 			}
 		}
 	}
-	x, y := cutEdgeAnchors(im)
+	x, y, _ := cutEdgeAnchors(im)
 	if x != 0 || y != 0 {
 		t.Fatalf("natural circular outline acquired anchors: %d,%d", x, y)
 	}
@@ -70,7 +70,7 @@ func TestCutEdgeAnchorsIgnoreNaturalContours(t *testing.T) {
 			}
 		}
 	}
-	x, y = cutEdgeAnchors(im)
+	x, y, _ = cutEdgeAnchors(im)
 	if x != 0 || y != 0 {
 		t.Fatalf("half-pixel circular outline acquired anchors: %d,%d", x, y)
 	}
@@ -82,7 +82,7 @@ func TestCutEdgeAnchorsKeepBothShortStraightSides(t *testing.T) {
 	im.SetNRGBA(50, 199, color.NRGBA{A: 8})
 	draw.Draw(im, image.Rect(0, 65, 25, 100), image.NewUniform(color.NRGBA{R: 200, A: 255}), image.Point{}, draw.Src)
 	draw.Draw(im, image.Rect(75, 120, 100, 165), image.NewUniform(color.NRGBA{R: 200, A: 255}), image.Point{}, draw.Src)
-	if x, y := cutEdgeAnchors(im); x != 2 || y != 0 {
+	if x, y, _ := cutEdgeAnchors(im); x != 2 || y != 0 {
 		t.Fatalf("partial straight side was lost against the full canvas: %d,%d", x, y)
 	}
 }
@@ -94,7 +94,7 @@ func TestCutEdgeAnchorsTolerateSparsePixelsBeforeStraightEdges(t *testing.T) {
 		im.SetNRGBA(p.X, p.Y, color.NRGBA{R: 180, A: 8})
 	}
 	before := append([]byte(nil), im.Pix...)
-	x, y := cutEdgeAnchors(im)
+	x, y, _ := cutEdgeAnchors(im)
 	if x != 2 || y != 1 {
 		t.Fatalf("near-edge alpha8 pixels hid sustained cut edges: %d,%d", x, y)
 	}
@@ -118,7 +118,7 @@ func TestCutEdgeAnchorsIgnoreCirclesAcrossSizesAndCanvasOffsets(t *testing.T) {
 							}
 						}
 					}
-					if x, y := cutEdgeAnchors(im); x != 0 || y != 0 {
+					if x, y, _ := cutEdgeAnchors(im); x != 0 || y != 0 {
 						t.Fatalf("complete circular contour acquired anchors: %d,%d", x, y)
 					}
 				})
@@ -143,7 +143,7 @@ func TestCutEdgeAnchorsRequireOriginalCanvasAdjacency(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			im := image.NewNRGBA(image.Rect(0, 0, 200, 200))
 			draw.Draw(im, tc.rect, image.NewUniform(color.NRGBA{R: 180, A: 255}), image.Point{}, draw.Src)
-			if x, y := cutEdgeAnchors(im); x != tc.x || y != tc.y {
+			if x, y, _ := cutEdgeAnchors(im); x != tc.x || y != tc.y {
 				t.Fatalf("canvas adjacency ignored: got (%d,%d), want (%d,%d)", x, y, tc.x, tc.y)
 			}
 			dir := t.TempDir()

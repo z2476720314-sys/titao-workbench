@@ -92,9 +92,6 @@ const (
 // minScale 是缩放硬下限：低于此值成品会缩成壳面上的小贴纸，无论评审给多少分都不接受。
 const minScale = 0.55
 
-// maxSingleStepShrink 是单轮允许的最大缩小幅度，避免一轮就把图案缩到无法挽回。
-const maxSingleStepShrink = 0.75
-
 // systemPrompt 只放角色、输出契约和硬门槛；判定细则在 user message 的 promptTemplate 里，
 // 避免同一套规则在两条消息里各写一遍、彼此矛盾。
 const systemPrompt = `你是手机壳套图成品的质检员。只输出一行完整 JSON，不分析、不加 Markdown、不写解释。
@@ -107,28 +104,29 @@ good=true 必须同时满足：score>=85、camera_clear=true、dx=0、dy=0、sca
 const promptTemplate = `【任务】审查本轮成品，判断原图重要内容是否完整、是否被镜头孔切断、是否被照片边缘裁掉，并给出一次可执行的修正。
 
 【判定优先级，从高到低】
-1. 内容完整：重要文字（含原图自带的小字、气泡字和已有残字）、主脸、主头部轮廓、占画面主要面积的主体整体（主树、主花等）必须完整可见。上述内容被镜头覆盖或被照片边缘裁掉，即 camera_clear=false 或 good=false。
+1. 内容完整：重要文字（含原图自带的小字、气泡字和已有残字）、主脸、主头部轮廓、主体整体（含主要图案的圆环上沿、蜘蛛的腿等轮廓）必须完整可见。上述内容被照片边缘裁掉时填 good=false。被镜头新增遮挡就必须同时填 camera_clear=false 和 good=false，即使只挡住轮廓的一段而中心还可见。
 2. 镜头避让：只有第 1 条的内容被镜头覆盖时才要求避让。镜头孔切掉的是重复背景纹样、连续纹样的边缘延伸、非主体的点缀，不算遮挡，不因此要求缩小或位移。
 3. 构图饱满：内容完整且避开镜头后不要再动。不得为了"更饱满""更满铺"放大，也不得为了换高分把整幅缩成底部小标志；但也不必追求铺满，正常留白可接受。
 
 构图饱满是最后一位，永远不能用来否决内容完整性；反过来，内容完整也不能成为放行镜头切断主标题的理由。
 
 【修正规则】
-- 初始摆放按原图大小居中出图，不在渲染阶段强制贴底或贴边；贴底、贴边都是你在评审这一轮时给出的修正，不是程序预置的。
+- 初始摆放按原图有效内容大小居中出图，用户设置的显式偏移在不越界和直切边约束内生效；直切边由程序校验并贴合，不因完整自然轮廓强制贴底。
 - 默认保持当前倍率直接出图；只有第 1 条的内容被遮或被裁，或下面提到的贴边没做到时才调整，且本轮一次给足修正量，不要小步试探拖到下一轮。
 - 底部优先：图案底部若是被笔直切线截断（能看到一条水平直线把图案切断），这条切线必须贴住壳底，不得悬空，用纵向位移 dy 往下压。此时不要顺手缩小——缩小会让底部重新离开壳边。
+- 条件贴底：上方重要内容被镜头遮挡时，程序先尝试把当前整幅图案整体向下平移到壳底，保持大小、比例和横向位置不变，不能向下拉伸，也不同时缩小。贴底后仍有遮挡时停止继续微调，如实保持 camera_clear=false、good=false，不得改写为已避镜头；不要再建议缩小、拉伸或重排。若下移违反顶部直切边或内容不越界约束，报告冲突，不能以改变大小代替平移。
 - 左右竖直切线：图案某一侧若有一条竖直直线把图案切断，成品该侧必须贴住壳边，不得留缝；左右两侧都有竖直切线时，横向拉伸到同时贴住两边（只改横向，不动纵向比例）。这个拉伸只能用来对齐边缘，不能把内容推出壳面。
 - 没有笔直切线就没有贴边义务：图案边缘是自然弧形、随手绘制的收边、或是完整独立的图形轮廓时，不需要贴壳边，正常留白即可，不要为了"对齐"去硬贴。
 - 内容不能越界：任何位移、缩放、拉伸之后，全部有效内容仍须留在印刷域内。贴边与不越界冲突时，先保不越界，报告冲突。
 - 顶部收尾补齐：当左右和底部都已经贴边、图案在壳面上占比明显较大，只剩下顶部还差一点点没贴住时，把顶部也纵向拉伸到贴住壳边（只改纵向，不改横向）。这是收尾动作，前提是三条边确实都已贴边且占比够大；只差一线就补齐，不要为了一点缝隙整体重排。
-- 优先横移 dx 绕开镜头；横移被边界夹回时改纵移 dy，或小幅缩小。
+- 上方镜头遮挡按条件贴底处理；其他内容被裁或直切边未贴合时，可用 dx/dy、缩放修正。
 - 单轮 scale_ratio 不低于 0.55。已是 0.55 仍无法露出重要内容的，判 false、返回 0/0/1 并写明具体冲突，不得改判合格。
 - dx、dy、scale_ratio、stretch_y 四项独立给出，不设固定步长、不用预设方向，可同时调整。stretch_y 是纵向拉伸倍数，只有「收尾补齐」时才不等于 1，其余情况一律填 1。
 - 比较本轮请求与实际位置：若被印刷域或直边约束夹回（画布未改变），本轮必须换方向或组合调整，不能重复同一组无效参数。
 
 【常见误判，不要犯】
 - 壳边透明框、模板手指、挂绳、反光、阴影、照片中印刷留白：都不属于图案问题，不得据此判不合格。
-- **贴近不等于遮挡**：只有当镜头孔的实体边缘确实压住笔画或主脸、且能指出哪一笔被切掉时才算遮挡。元素紧挨镜头孔边缘、被镜头外圆环的反光或阴影蹭到、因拍摄角度看起来拥挤，都属于正常排版，判合格。判遮挡前先自问：这个字少了哪一笔？这个脸少了哪一部位？说不出来就不是遮挡。
+- **贴近不等于遮挡**：对照原图检查镜头实体外框是否盖住笔画、主脸或主体轮廓；紧挨镜头外框、反光和阴影都不算实际挡住。判遮挡前先自问：这个字少了哪一笔？这个脸或主体少了哪一段轮廓？说不出来就不是遮挡。
 - 低对比不等于内容丢失，浅色头部先确认真实轮廓再判断。
 - 原图本身就截断的轮廓、半身形象、半个字：成品保持一致就算完整，不得推想原图不存在的头顶、身体或笔画。
 - 成品黑白区域与原图一致时，不得臆测成透明渲染错误。
@@ -312,16 +310,16 @@ func parseAdvice(blob string) Advice {
 		blob = strings.TrimSpace(strings.TrimSuffix(content, "```"))
 	}
 	var result struct {
-		Good        *bool    `json:"good"`
-		CameraClear *bool    `json:"camera_clear"`
+		Good        *bool          `json:"good"`
+		CameraClear *bool          `json:"camera_clear"`
 		Score       *flexibleScore `json:"score"`
-		Problem     *string       `json:"problem"`
-		DX          *float64      `json:"dx"`
-		DY          *float64      `json:"dy"`
-		ScaleRatio  *float64      `json:"scale_ratio"`
-		StretchY    *float64      `json:"stretch_y"`
-		Direction   string        `json:"direction"`
-		Step        float64       `json:"step"`
+		Problem     *string        `json:"problem"`
+		DX          *float64       `json:"dx"`
+		DY          *float64       `json:"dy"`
+		ScaleRatio  *float64       `json:"scale_ratio"`
+		StretchY    *float64       `json:"stretch_y"`
+		Direction   string         `json:"direction"`
+		Step        float64        `json:"step"`
 	}
 	var fields map[string]json.RawMessage
 	if json.Unmarshal([]byte(blob), &result) != nil || json.Unmarshal([]byte(blob), &fields) != nil ||
@@ -383,7 +381,7 @@ func finite(values ...float64) bool {
 
 func validAdjustment(a Adjustment) bool {
 	return finite(a.DX, a.DY, a.ScaleRatio, a.StretchY) && math.Abs(a.DX) <= 1 && math.Abs(a.DY) <= 1 &&
-		a.ScaleRatio >= 0.05 && a.ScaleRatio <= 2 &&
+		a.ScaleRatio >= minScale && a.ScaleRatio <= 2 &&
 		// 纵向拉伸只用于补齐顶部一线，区间与 psx 的 ValidStretch 保持一致：
 		// 两处各写一个魔数曾在 v0.3.22 造成「模型给了 1.05、画布直接构建失败」。
 		a.StretchY >= psx.MinVerticalStretch && a.StretchY <= psx.MaxVerticalStretch
@@ -419,6 +417,7 @@ func fallback(err error) Advice {
 //   - bigger/smaller → 以当前 scale 为中心按 step 展开 3 档；
 //   - up/down/left/right → scale 不变，只调 offset；
 //   - avoid_cam → 先缩小 step，再按当前重心偏移的反方向微移。
+//
 // Plan 根据评审建议算出下一轮要用的参数。
 //
 // 入参是上一轮选中的实际参数（scale 为相对铺满的倍数，
@@ -435,11 +434,10 @@ func Plan(adv Advice, scale, offsetX, offsetY, stretchY float64) (nextScale floa
 		if !validAdjustment(*adv.Transform) {
 			return scale, offsetX, offsetY, stretchY, false
 		}
-		nextScale = scale * adv.Transform.ScaleRatio
-		if nextScale < scale*maxSingleStepShrink {
-			nextScale = scale * maxSingleStepShrink
+		nextScale = scale
+		if adv.Transform.ScaleRatio != 1 {
+			nextScale = math.Max(minScale, scale*adv.Transform.ScaleRatio)
 		}
-		nextScale = clampScaleFloor(nextScale, scale)
 		nextOffX, nextOffY = offsetX+adv.Transform.DX, offsetY+adv.Transform.DY
 		nextStretchY = stretchY
 		if adv.Transform.StretchY > 0 && adv.Transform.StretchY != 1 {
@@ -502,19 +500,6 @@ func clampScale(v float64) float64 {
 	}
 	if v > 2.0 {
 		return 2.0
-	}
-	return v
-}
-
-// clampScaleFloor 在保持基准缩放的相对下限的前提下夹回倍率：
-// 基准已经小于 minScale 时不再把它放大，只禁止继续缩小。
-func clampScaleFloor(v, base float64) float64 {
-	if math.IsNaN(v) || math.IsInf(v, 0) {
-		return base
-	}
-	floor := math.Min(base, minScale)
-	if v < floor {
-		return floor
 	}
 	return v
 }

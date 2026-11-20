@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 // Copy 把 src 复制到 dst（覆盖已存在的 dst）。
@@ -57,78 +56,22 @@ func OpenPath(path string) error {
 	return exec.Command("explorer", path).Start()
 }
 
-// Reveal 在资源管理器里选中并定位到 path。
-//
-// 为什么不用 explorer /select,：
-// 实测这台机器上，从非交互进程里直接启动 explorer.exe 一律返回退出码 1
-// （连 `explorer <目录>` 都失败），而 /select, 还额外要求原生反斜杠路径、
-// 逗号后不能有空格。调用方看到 Start() 返回 nil 以为成功，实际什么都没选中,
-// 这就是「定位没反应」的成因。
-//
-// 改用 Shell.Application COM：Namespace 拿到文件夹、ParseName 拿到条目，
-// 再用 InvokeVerbEx 让 shell 自己派发打开动作，最后对匹配到该目录的窗口
-// 调 SelectItem 选中。shellexec 由 shell 派发，窗口归属正确，实测可选中。
-func Reveal(path string) error {
-	clean := filepath.Clean(path)
-	abs, err := filepath.Abs(clean)
+// Reveal opens the parent folder and selects the requested item.
+func Reveal(path string) error { return reveal(path, revealFile) }
+
+func reveal(path string, selectFile func(string) error) error {
+	if path == "" {
+		return fmt.Errorf("路径为空")
+	}
+	abs, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
-		abs = clean
+		return fmt.Errorf("解析文件路径: %w", err)
 	}
 	if _, err := os.Stat(abs); err != nil {
-		return fmt.Errorf("文件不存在: %s", abs)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("文件不存在 %q: %w", abs, err)
+		}
+		return fmt.Errorf("无法访问文件 %q: %w", abs, err)
 	}
-	// PowerShell 从命令行接收中文路径会乱码，改为写文件再由脚本读。
-	dir, err := os.MkdirTemp("", "titao-reveal")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-	pathFile := filepath.Join(dir, "target.txt")
-	if err := os.WriteFile(pathFile, []byte(abs), 0600); err != nil {
-		return err
-	}
-	script := "\uFEFF" + revealScript(filepath.ToSlash(pathFile))
-	scriptFile := filepath.Join(dir, "reveal.ps1")
-	if err := os.WriteFile(scriptFile, []byte(script), 0600); err != nil {
-		return err
-	}
-	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive",
-		"-ExecutionPolicy", "Bypass", "-File", scriptFile).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("在资源管理器定位失败: %v %s", err, strings.TrimSpace(string(out)))
-	}
-	if !strings.Contains(string(out), "selected=True") {
-		return fmt.Errorf("资源管理器未选中该文件: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// revealScript 生成定位脚本。0x1C = SELECT|DESELECTOTHERS|ENSUREVISIBLE|FOCUS。
-func revealScript(pathFile string) string {
-	return `$p = [System.IO.File]::ReadAllText('` + pathFile + `', [System.Text.Encoding]::UTF8).Trim()
-$dir = [System.IO.Path]::GetDirectoryName($p)
-$leaf = [System.IO.Path]::GetFileName($p)
-$sh = New-Object -ComObject Shell.Application
-$folder = $sh.Namespace($dir)
-$item = $folder.ParseName($leaf)
-if ($null -eq $item) { Write-Output "selected=False"; exit 0 }
-# 必须用 Explore 打开目标文件夹。InvokeVerbEx('', '') 会落到默认动作，
-# 实测打开的是「文档」目录，目标窗口根本不出现，选中自然一直失败。
-$sh.Explore($dir)
-$done = $false
-for ($i = 0; $i -lt 24 -and -not $done; $i++) {
-  Start-Sleep -Milliseconds 250
-  foreach ($w in $sh.Windows()) {
-    try {
-      $wp = $w.Document.Folder.Self.Path
-      if ($wp -and ($wp.TrimEnd('\') -ieq $dir.TrimEnd('\'))) {
-        $w.Document.SelectItem($item, 0x1C)
-        $done = $true
-        break
-      }
-    } catch {}
-  }
-}
-Write-Output ("selected=" + $done)
-`
+	return selectFile(abs)
 }

@@ -215,7 +215,7 @@ function executeAction(action,d){
  if(action=='placedLayerEditContents') {innerDoc.fullName={fsName:doc.activeLayer.source};app.activeDocument=innerDoc;}
  else if(action=='Plc '){
   places++;if(app.activeDocument!==innerDoc)outerChanged=true;
-  if(d.path.indexOf('print_canvas_')<0)throw Error('placed original pattern');
+  if(d.path.indexOf('print_canvas_')<0 && !(typeof allowOriginal!='undefined' && allowOriginal))throw Error('placed original pattern');
   // Photoshop native Place centered and scaled the visible 400x900 alpha box.
   placed.bounds=[unit(200),unit(300),unit(400),unit(750)];
  } else throw Error('unexpected action '+action);

@@ -34,23 +34,43 @@ func renderedPlacement(req psx.RenderRequest, index int) (*psx.RenderMetadata, p
 		return nil, ref, fmt.Errorf("渲染未完成印刷画布不裁切校验")
 	}
 	canvasPath := req.PrintCanvasPath(index)
+	if meta.ArtifactKind == psx.DirectArtwork {
+		canvasPath = req.ArtworkPlanPath(index)
+	}
 	if req.Canvas != nil {
 		canvasPath = req.Canvas.Path
 		if meta.CanvasSHA256 != req.Canvas.SHA256 {
 			return nil, ref, fmt.Errorf("模板未使用冻结的公共印刷画布")
 		}
 	}
-	canvasData, err := os.ReadFile(canvasPath)
-	if err != nil {
-		return nil, ref, fmt.Errorf("印刷画布证据缺失: %w", err)
-	}
-	canvasHash := sha256.Sum256(canvasData)
-	if meta.CanvasSHA256 != hex.EncodeToString(canvasHash[:]) || meta.CanvasWidth != printcanvas.Width || meta.CanvasHeight != printcanvas.Height {
-		return nil, ref, fmt.Errorf("印刷画布证据不一致")
-	}
-	canvasImage, err := png.Decode(bytes.NewReader(canvasData))
-	if err != nil || canvasImage.Bounds().Dx() != printcanvas.Width || canvasImage.Bounds().Dy() != printcanvas.Height {
-		return nil, ref, fmt.Errorf("印刷画布PNG内容或尺寸无效")
+	if meta.ArtifactKind == psx.DirectArtwork {
+		plan, err := psx.LoadArtworkPlan(canvasPath)
+		if err != nil {
+			return nil, ref, fmt.Errorf("原图摆放证据无效: %w", err)
+		}
+		if meta.CanvasSHA256 != plan.SHA256 || meta.SourceSHA256 != plan.SourceSHA256 || meta.Transform != plan.Transform || meta.CanvasWidth != plan.Width || meta.CanvasHeight != plan.Height || meta.CanvasVerified != plan.Verified {
+			return nil, ref, fmt.Errorf("原图或统一变换证据不一致")
+		}
+		for _, p := range meta.Placements {
+			want := plan.Placement
+			want.Cell = p.Cell
+			if p != want {
+				return nil, ref, fmt.Errorf("回执未使用冻结的原图摆放")
+			}
+		}
+	} else {
+		canvasData, err := os.ReadFile(canvasPath)
+		if err != nil {
+			return nil, ref, fmt.Errorf("印刷画布证据缺失: %w", err)
+		}
+		canvasHash := sha256.Sum256(canvasData)
+		if meta.CanvasSHA256 != hex.EncodeToString(canvasHash[:]) || meta.CanvasWidth != printcanvas.Width || meta.CanvasHeight != printcanvas.Height {
+			return nil, ref, fmt.Errorf("印刷画布证据不一致")
+		}
+		canvasImage, err := png.Decode(bytes.NewReader(canvasData))
+		if err != nil || canvasImage.Bounds().Dx() != printcanvas.Width || canvasImage.Bounds().Dy() != printcanvas.Height {
+			return nil, ref, fmt.Errorf("印刷画布PNG内容或尺寸无效")
+		}
 	}
 	if len(meta.Placements) == 0 {
 		return nil, ref, fmt.Errorf("渲染未返回实际摆放参数")

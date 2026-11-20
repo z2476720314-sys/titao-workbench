@@ -39,6 +39,7 @@ type PatternResult struct {
 	ContentBounds [4]float64
 	// Negative anchors attach left/top; positive attach right/bottom; X=2 spans both sides.
 	AnchorX, AnchorY int
+	TopCut           bool
 }
 
 // Rect 是矩形区域。
@@ -98,7 +99,7 @@ func Normalize(src, dst string, trim bool) (PatternResult, error) {
 	}
 	res.BottomContent = bottomPixels >= max(1, (rgba.Bounds().Dx()*band+99)/100)
 	// Detect source-canvas cuts before trimming creates new edges around complete elements.
-	res.AnchorX, res.AnchorY = cutEdgeAnchors(rgba)
+	res.AnchorX, res.AnchorY, res.TopCut = cutEdgeAnchors(rgba)
 
 	if trim {
 		if box, ok := alphaBoundsAtLeast(rgba, 1); ok && box != b {
@@ -180,10 +181,10 @@ func alphaBounds(img *image.NRGBA) (image.Rectangle, bool) {
 }
 
 // cutEdgeAnchors distinguishes a sustained straight cut from a natural contour.
-func cutEdgeAnchors(img *image.NRGBA) (int, int) {
+func cutEdgeAnchors(img *image.NRGBA) (int, int, bool) {
 	b, ok := alphaBoundsAtLeast(img, 8)
 	if !ok {
-		return 0, 0
+		return 0, 0, false
 	}
 	runFraction := func(start, delta image.Point, length int) float64 {
 		run, longest := 0, 0
@@ -233,19 +234,22 @@ func cutEdgeAnchors(img *image.NRGBA) (int, int) {
 		bottom = bandScore(image.Pt(b.Min.X, b.Max.Y-1), image.Pt(1, 0), image.Pt(0, -1), b.Dx(), b.Dy())
 	}
 	x, y := 0, 0
-	// 判据：某一侧出现「竖直或水平的直线切口」就该贴那一侧。
-	// 之前的阈值 0.15 要求切线连续贯穿整条边，右侧被切断的字母往往
-	// 只占一半左右（实测 0.1379），于是左右都切开的图案只判出一侧。
-	// 现在降低到 0.10：只要够一条直线切口就认，但同侧仍要求逐层稳定，
-	// 避免把自然弧边或零散点缀误判成切口。
 	const verticalCut, horizontalCut = .10, .12
-	if max(left, right) >= verticalCut {
+	leftCut, rightCut := left >= verticalCut, right >= verticalCut
+	// A stable cut on the original border need not span a percentage of the whole artwork.
+	if b.Min.X == canvas.Min.X && edgeScore(b.Min, image.Pt(0, 1), image.Pt(1, 0), b.Dy(), b.Dx()) > 0 {
+		leftCut = true
+	}
+	if b.Max.X == canvas.Max.X && edgeScore(image.Pt(b.Max.X-1, b.Min.Y), image.Pt(0, 1), image.Pt(-1, 0), b.Dy(), b.Dx()) > 0 {
+		rightCut = true
+	}
+	if leftCut || rightCut {
 		x = -1
-		if right > left {
+		if !leftCut {
 			x = 1
 		}
 		// 两侧都有竖直切口时必须同时贴边，不能只贴切线更长的那一侧。
-		if min(left, right) >= verticalCut {
+		if leftCut && rightCut {
 			x = 2
 		}
 	}
@@ -255,7 +259,7 @@ func cutEdgeAnchors(img *image.NRGBA) (int, int) {
 			y = -1
 		}
 	}
-	return x, y
+	return x, y, top >= horizontalCut
 }
 
 func alphaBoundsAtLeast(img *image.NRGBA, minimum uint8) (image.Rectangle, bool) {

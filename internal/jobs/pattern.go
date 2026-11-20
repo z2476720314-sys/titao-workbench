@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -73,10 +73,6 @@ func patternGroupKey(t *Task) string {
 // minCompositionScale 是构图下限：缩放低于该值说明在用「整体缩小」换镜头避让，
 // 成品会缩成壳面上的小贴纸，即使评审给高分也不得判合格。
 const minCompositionScale = 0.55
-
-// minAcceptScore 是「模型已判全部避镜头」时可直接接受的最低分，
-// 与 tuner 的合格线保持一致。
-const minAcceptScore = 85
 
 // adjustmentOf 取建议里的联合调整参数，仅用于日志诊断。
 func adjustmentOf(adv tuner.Advice) tuner.Adjustment {
@@ -318,20 +314,23 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 	if tasks[0].KeepWhole {
 		opt.NoCrop = true
 	}
-	pattern := filepath.Join(work, "source.png")
+	pattern := sourceSnapshot
 	autoLayout := opt.Auto && fitIsContainLike(opt.Fit)
-	pr, err := imgutil.Normalize(sourceSnapshot, pattern, opt.TrimAlpha && !autoLayout)
+	// Detect original cut edges before Plan removes only the outer zero-alpha pixels.
+	pr, err := imgutil.Normalize(sourceSnapshot, filepath.Join(work, "analysis.png"), false)
 	if err != nil {
 		fail(err)
 		return
 	}
 	if tasks[0].KeepWhole {
 		pr.AnchorX, pr.AnchorY = 0, 0
+		pr.BottomContent = false
+		pr.TopCut = false
 	}
 	fit := opt.Fit
-	if opt.NoCrop {
+	if opt.NoCrop && fit != "" && fit != psx.FitAuto && fit != psx.FitNone {
 		fit = psx.FitContain
-	} else if autoLayout {
+	} else if autoLayout && fit != "" && fit != psx.FitAuto && fit != psx.FitNone {
 		fit = psx.FitCover
 	}
 	// 贴底入口：`AlignBottom` 只在非 NoCrop 的手动摆位里被读取
@@ -345,13 +344,10 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			pr.AnchorY = 1
 		}
 	}
-	request := psx.RenderRequest{Pattern: pattern, Fit: fit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, ContentBounds: pr.ContentBounds, AnchorX: pr.AnchorX, AnchorY: pr.AnchorY, AlignBottom: alignBottom && !opt.NoCrop}
+	request := psx.RenderRequest{Pattern: pattern, Fit: fit, NoCrop: opt.NoCrop, OffsetX: opt.OffsetX, OffsetY: opt.OffsetY, ContentBounds: pr.ContentBounds, AnchorX: pr.AnchorX, AnchorY: pr.AnchorY, IgnoreCutAnchors: tasks[0].KeepWhole, AlignBottom: alignBottom && !opt.NoCrop}
 	scale := 1.0
 	if !opt.Auto && len(opt.Scales) > 0 {
 		scale = opt.Scales[0]
-	}
-	if autoLayout {
-		request.OffsetX, request.OffsetY = 0, 0
 	}
 	placement := judge.Placement{Fit: fit, NoCrop: opt.NoCrop, KeepWhole: tasks[0].KeepWhole, AnchorX: pr.AnchorX, AnchorY: pr.AnchorY}
 	if opt.Auto {
@@ -366,6 +362,8 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 	var history []tuner.Round
 	stopNote := ""
 	feedbackUsed := false
+	var bottomPending *psx.PrintCanvas
+	bottomTried := false
 	// 分数掉头就止损：模型每轮都在猜，追不上历史最好分说明方向走不通，
 	// 继续跑只会把渲染和评审再重复一遍（每轮约 40-50s）。
 	stalled := newStallTracker()
@@ -379,14 +377,26 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			return
 		}
 		request.PreferOffsets = round > 1
-		canvas, err := printcanvas.Build(pattern, filepath.Join(roundDir, "print_canvas.png"), request, scale)
+		var canvas *psx.PrintCanvas
+		bottomRound := bottomPending != nil
+		if bottomRound {
+			canvas = bottomPending
+			bottomPending, bottomTried = nil, true
+		} else {
+			canvas, err = printcanvas.Plan(pattern, filepath.Join(roundDir, "artwork_plan.json"), request, scale)
+		}
 		if err != nil {
-			fail(fmt.Errorf("生成统一印刷画布: %w", err))
+			if best != nil && errors.Is(err, printcanvas.ErrEdgeStretchConflict) {
+				stopNote = fmt.Sprintf("本轮微调与直边贴合冲突：%v。已保留此前套图，请人工复核", err)
+				e.logf("warn", "  第%d轮 %s", round, stopNote)
+				break
+			}
+			fail(fmt.Errorf("生成统一原图版位: %w", err))
 			return
 		}
 		reused := current != nil && canvas.SHA256 == current.canvas.SHA256
 		if reused && (feedbackUsed || round == rounds) {
-			stopNote = "统一画布已到约束，调整未生效，请人工复核"
+			stopNote = "统一版位已到约束，调整未生效，请人工复核"
 			break
 		}
 		candidate := &patternRound{canvas: canvas, score: 100, clear: true, good: true, composition: true}
@@ -394,13 +404,13 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			feedbackUsed = true
 			candidate.projections = current.projections
 			candidate.diagnostics = current.diagnostics
-			e.logf("warn", "  公共画布未改变，反馈实际参数后仅复核一次")
+			e.logf("warn", "  公共版位未改变，反馈实际参数后仅复核一次")
 		} else {
 			for i, task := range tasks {
 				e.updateTask(task, func(t *Task) {
 					t.Phase = PhaseRender
 					t.Progress = 20
-					t.Message = fmt.Sprintf("公共画布第%d轮投影", round)
+					t.Message = fmt.Sprintf("公共版位第%d轮投影", round)
 				})
 				local := *task
 				local.Pattern, local.Template = pattern, templates[i]
@@ -443,7 +453,7 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 					return
 				}
 				if local.CanvasSHA256 != canvas.SHA256 {
-					fail(fmt.Errorf("%s 未使用同一版印刷画布", task.TemplateName))
+					fail(fmt.Errorf("%s 未使用同一版原图版位", task.TemplateName))
 					return
 				}
 				candidate.projections = append(candidate.projections, &local)
@@ -453,9 +463,9 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 		candidate.advice = make([]tuner.Advice, len(tasks))
 		if canvas.Placement.AnchorImpossible {
 			candidate.good, candidate.clear, candidate.score = false, false, 0
-			stopNote = "统一印刷画布无法同时满足内容完整和直边贴合，请人工复核"
+			stopNote = "统一原图版位无法同时满足内容完整和直边贴合，请人工复核"
 		} else if reviewOn {
-			// 同一图案的多个模板共用一套印刷画布与摆放参数，评审一次即可：
+			// 同一图案的多个模板共用一套原图版位与摆放参数，评审一次即可：
 			// 微调值是全局的，第二个模板再问一遍只是把同一个问题再问一次，
 			// 每多问一次就多一次视觉请求（单次 35-47s）。因此只用第一个模板送审，
 			// 其余模板直接复用它的结论。
@@ -526,9 +536,9 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 				replies[i] = make([]tuner.Advice, 1)
 				check := placement
 				check.DiagnosticViews = diagnosticViews[i]
-				check.AppliedSummary = "dx向公共印刷画布右，dy向画布下，不是原照片的屏幕上下左右。"
+				check.AppliedSummary = "dx向公共原图版位右，dy向画布下，不是原照片的屏幕上下左右。"
 				if projection.ReviewQuarterTurns != nil {
-					check.AppliedSummary += "评审照片已按模板真实变换校正到印刷画布上方向。"
+					check.AppliedSummary += "评审照片已按模板真实变换校正到原图版位上方向。"
 				}
 				for cell := range projection.Files {
 					static := false
@@ -544,7 +554,7 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 					}
 				}
 				check.Scale, check.OffsetX, check.OffsetY = canvas.Placement.Scale, canvas.Placement.OffsetX, canvas.Placement.OffsetY
-				check.AppliedSummary += fmt.Sprintf("同一图案全部模板使用公共印刷画布，canvas_sha=%s；当前模板=%s。程序验证公共画布直边已贴合=%t。手机壳边框、透明框、阴影不属于待评项，不得因这些给出不合格或放大建议；但图案自身有笔直切线（竖直或水平的直线切断）却没贴住对应壳边时，贴边属于待评问题，必须指出。当前纵横相对比例=%.6g；纵向比例允许范围是0.97至1.08，其中超过1.03只用于顶部收尾补齐，不能靠明显压扁或拉长主体来避镜头。数值只针对公共印刷域，任何调整使所有模板同步重投影，禁止单独改变一张的位置。", canvas.SHA256, projection.TemplateName, !canvas.Placement.AnchorUnmet, canvas.Placement.VerticalStretch())
+				check.AppliedSummary += fmt.Sprintf("同一图案全部模板使用公共原图版位，plan_sha=%s；当前模板=%s。程序验证公共版位直边已贴合=%t。手机壳边框、透明框、阴影不属于待评项，不得因这些给出不合格或放大建议；但图案自身有笔直切线（竖直或水平的直线切断）却没贴住对应壳边时，贴边属于待评问题，必须指出。当前纵横相对比例=%.6g；允许范围是%.2f至%.2f，不能靠明显压扁或拉长主体来避镜头。本轮已执行遮挡后下移贴底=%t；该动作只改变纵向位置，不改变大小或比例，仍遮挡时如实报告并停止调整。数值只针对公共印刷域，任何调整使所有模板同步重投影，禁止单独改变一张的位置。", canvas.SHA256, projection.TemplateName, !canvas.Placement.AnchorUnmet, canvas.Placement.VerticalStretch(), psx.MinVerticalStretch, psx.MaxVerticalStretch, bottomTried)
 				if reused {
 					check.AppliedSummary += "上次请求被印刷域或直边约束夹回，画布未改变；请联合调整缩小、位移或左右拉伸，不能重复无效建议。"
 				}
@@ -578,7 +588,7 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			// 分别评审只会得到互相冲突的建议，还多花数倍时间。
 			for i := reviewTemplate + 1; i < len(candidate.advice); i++ {
 				candidate.advice[i] = candidate.advice[reviewTemplate]
-				e.logf("dim", "  %s 复用 %s 的评审结论（同一图案共用画布与参数）",
+				e.logf("dim", "  %s 复用 %s 的评审结论（同一图案共用版位与参数）",
 					tasks[i].TemplateName, tasks[reviewTemplate].TemplateName)
 			}
 			for i, adv := range candidate.advice {
@@ -608,7 +618,7 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			}
 		} else if canvas.Placement.AnchorUnmet {
 			candidate.good, candidate.clear = false, false
-			stopNote = "统一画布直边未贴合，请人工复核"
+			stopNote = "统一版位直边未贴合，请人工复核"
 		}
 		if reviewOn && canvas.Placement.Scale < minCompositionScale {
 			candidate.composition = false
@@ -618,17 +628,14 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 				e.logf("warn", "  第%d轮构图过小：scale=%.3f < %.2f，判不合格", round, canvas.Placement.Scale, minCompositionScale)
 			}
 		}
-		// 模型自己已判「全部照片格都避开镜头、分数达标」，只是给的调整参数不规整
-		// （good=false 但 camera_clear=true）时按达标接受：否则会因一次无效微调
-		// 把本来可用的成品推翻成失败。
-		if reviewOn && !candidate.good && candidate.composition && candidate.clear && candidate.score >= minAcceptScore {
-			candidate.good = true
-			stopNote = ""
-			e.logf("info", "  第%d轮已达 %.0f%% 构图且全部避镜头（%d分），接受本轮结果", round, canvas.Placement.Scale*100, candidate.score)
-		}
 		current = candidate
 		if best == nil || (candidate.good && !best.good) || (candidate.good == best.good && ((candidate.composition && !best.composition) || (candidate.composition == best.composition && (candidate.score > best.score || (candidate.score == best.score && candidate.clear && !best.clear))))) {
 			best = candidate
+		}
+		if bottomRound {
+			// 用户选择贴底结果，即使分数变低也不退回悬空版位。
+			best = candidate
+			stalled = newStallTracker()
 		}
 		problem := stopNote
 		chosen := -1
@@ -647,9 +654,9 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			}
 		}
 		if candidate.good && reviewOn {
-			problem = "所有模板共用画布并通过本轮检查"
+			problem = "所有模板共用版位并通过本轮检查"
 		} else if candidate.good {
-			problem = "统一画布投影完成，未调用自动评审"
+			problem = "统一版位投影完成，未调用自动评审"
 		}
 		recordedScore := candidate.score
 		if !reviewOn || recordedScore < 0 {
@@ -661,8 +668,39 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 				t.Phase = PhaseTune
 				t.Progress = 72
 				t.TuneHistory = append([]tuner.Round(nil), history...)
-				t.Message = fmt.Sprintf("公共画布第%d轮检查", round)
+				t.Message = fmt.Sprintf("公共版位第%d轮检查", round)
 			})
+		}
+		if reviewOn && !candidate.clear && candidate.score >= 0 && !canvas.Placement.AnchorImpossible {
+			if bottomTried {
+				best = candidate
+				stopNote = "贴底后仍有遮挡，按用户规则停止继续微调；保留遮挡记录，请人工复核"
+				break
+			}
+			if request.AnchorY == -1 || request.AnchorY == 2 || (pr.TopCut && canvas.Transform[5] <= .002) {
+				stopNote = "下移贴底与顶部直切边约束冲突，保持图案大小与比例，请人工复核"
+				break
+			}
+			if !canvas.Verified {
+				stopNote = "当前版位超出印刷域，无法安全下移，请人工复核"
+				break
+			}
+			bottom, err := printcanvas.MoveToBottom(canvas, filepath.Join(roundDir, "bottom", "artwork_plan.json"))
+			if err != nil {
+				fail(fmt.Errorf("下移贴底: %w", err))
+				return
+			}
+			if bottom == canvas {
+				best = candidate
+				stopNote = "已无向下移动空间，仍有遮挡，请人工复核"
+				break
+			}
+			if round < rounds {
+				bottomPending = bottom
+				e.logf("info", "  上方内容被镜头遮挡，下一轮仅整体向下平移贴底，大小、比例和横向位置不变")
+				continue
+			}
+			stopNote = "评审轮数已用完，尚未尝试下移贴底，请人工复核"
 		}
 		if candidate.good || !reviewOn || canvas.Placement.AnchorImpossible || round == rounds {
 			break
@@ -696,11 +734,14 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 		scale, request.OffsetX, request.OffsetY = next, nx, ny
 		request.StretchY = nsy
 	}
+	if stopNote != "" && len(history) > 0 && !history[len(history)-1].Good && !strings.Contains(history[len(history)-1].Problem, stopNote) {
+		history[len(history)-1].Problem += "；" + stopNote
+	}
 	if !wait() {
 		return
 	}
 	if best == nil {
-		fail(fmt.Errorf("没有可用的统一画布投影"))
+		fail(fmt.Errorf("没有可用的统一版位投影"))
 		return
 	}
 	if err := printcanvas.Validate(best.canvas); err != nil {
@@ -727,22 +768,23 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			}
 		}
 	}
-	finalDir := filepath.Join(outRoot, tasks[0].PatternName)
+	relativeDir := tasks[0].PatternName
 	if !best.good {
 		// 待复核产物单独成目录，避免和合格品混在同一个输出根下被误用。
-		finalDir = filepath.Join(outRoot, "_待复核", tasks[0].PatternName)
+		relativeDir = filepath.Join("_待复核", relativeDir)
 	}
+	finalDir := filepath.Join(outRoot, relativeDir)
 	if err := os.MkdirAll(finalDir, 0755); err != nil {
 		fail(err)
 		return
 	}
-	artifactDir, err := e.canvasArtifactDir(outRoot, tasks[0].PatternName)
+	artifactDir, err := e.canvasArtifactDir(outRoot, relativeDir)
 	if err != nil {
 		fail(err)
 		return
 	}
-	canvasPath := filepath.Join(artifactDir, "print_canvas.png")
-	publication := map[string]string{canvasPath: best.canvas.Path}
+	canvasPath := filepath.Join(artifactDir, "artwork_plan.json")
+	publication := map[string]string{canvasPath: best.canvas.Path, filepath.Join(artifactDir, best.canvas.SourceFile): best.canvas.SourcePath()}
 	var finalFiles [][]string
 	for _, projection := range best.projections {
 		var files []string
@@ -757,19 +799,6 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 		}
 		finalFiles = append(finalFiles, files)
 	}
-	manifest := *best.canvas
-	manifest.Path = canvasPath
-	manifestData, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		fail(err)
-		return
-	}
-	manifestPath := filepath.Join(work, "print_canvas.json")
-	if err := os.WriteFile(manifestPath, manifestData, 0600); err != nil {
-		fail(err)
-		return
-	}
-	publication[filepath.Join(artifactDir, "print_canvas.json")] = manifestPath
 	for destination := range publication {
 		dstAbs, _ := filepath.Abs(destination)
 		for source := range protected {
@@ -793,15 +822,15 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 		fail(err)
 		return
 	}
-	note := fmt.Sprintf("公共画布检查%d分", best.score)
+	note := fmt.Sprintf("公共版位检查%d分", best.score)
 	if best.score < 0 {
-		note = "公共画布评审未完成"
+		note = "公共版位评审未完成"
 		if best.reviewErr != "" {
 			note += "（" + best.reviewErr + "）"
 		}
 	}
 	if !reviewOn {
-		note = "共用统一印刷画布，未调用自动评审"
+		note = "共用统一原图版位，未调用自动评审"
 	}
 	if !best.good {
 		note += "；" + stopNote
@@ -831,7 +860,7 @@ func (e *Engine) processPattern(ctx context.Context, opt Options, def cfg.Config
 			t.TuneHistory = append([]tuner.Round(nil), history...)
 			t.ElapsedMS = time.Since(started).Milliseconds()
 			t.JudgeNote = note
-			t.Message = fmt.Sprintf("生成%d张，共用同一印刷画布", len(t.Files))
+			t.Message = fmt.Sprintf("生成%d张，共用同一原图版位", len(t.Files))
 			t.Error = ""
 			if !best.good {
 				t.Phase = PhaseFailed

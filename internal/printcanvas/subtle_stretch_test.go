@@ -13,8 +13,7 @@ func TestCanonicalValidatorsRejectExcessiveStretchEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 上界是 psx.MaxVerticalStretch（1.08）；超过它才算「明显变形」。
-	for _, ratio := range []float64{.96, 1.09, 1.2, -1, math.NaN(), math.Inf(1)} {
+	for _, ratio := range []float64{.89, 1.13, 1.2, -1, math.NaN(), math.Inf(1)} {
 		c.Placement.StretchY = ratio
 		if err := Validate(c); err == nil {
 			t.Errorf("builder validator accepted stretch %v", ratio)
@@ -25,31 +24,31 @@ func TestCanonicalValidatorsRejectExcessiveStretchEvidence(t *testing.T) {
 	}
 }
 
-func TestPairedSidesAllowOnlySubtleVerticalAdjustment(t *testing.T) {
-	c, err := Build(patternFile(t, solid(945, 1890)), filepath.Join(t.TempDir(), "canvas.png"), psx.RenderRequest{NoCrop: true, PreferOffsets: true, AnchorX: 2, OffsetY: .2}, .8)
+func TestPairedSidesPreserveRequestedVerticalScale(t *testing.T) {
+	c, err := Build(patternFile(t, solid(945, 1890)), filepath.Join(t.TempDir(), "canvas.png"), psx.RenderRequest{NoCrop: true, PreferOffsets: true, AnchorX: 2, OffsetY: .2}, .95)
 	if err != nil {
 		t.Fatal(err)
 	}
 	box := alphaBox(canvasImage(t, c))
-	if box.Dx() != Width || box.Max.Y != Height || box.Dy() >= Height || box.Dy() < 1833 || c.Placement.AnchorUnmet || !c.Verified {
+	if box.Dx() != Width || box.Max.Y != Height || math.Abs(float64(box.Dy())-1890*.95) > 1 || c.Placement.AnchorUnmet || !c.Verified {
 		t.Fatalf("paired sides blocked subtle safe adjustment or allowed obvious distortion: bounds=%v canvas=%+v", box, c)
 	}
 }
 
-func TestPairedTopBottomAllowOnlySubtleHorizontalAdjustment(t *testing.T) {
-	c, err := Build(patternFile(t, solid(945, 1890)), filepath.Join(t.TempDir(), "canvas.png"), psx.RenderRequest{NoCrop: true, PreferOffsets: true, AnchorY: 2, OffsetX: .2}, .8)
+func TestPairedTopBottomPreserveRequestedHorizontalScale(t *testing.T) {
+	c, err := Build(patternFile(t, solid(945, 1890)), filepath.Join(t.TempDir(), "canvas.png"), psx.RenderRequest{NoCrop: true, PreferOffsets: true, AnchorY: 2, OffsetX: .2}, .95)
 	if err != nil {
 		t.Fatal(err)
 	}
 	box := alphaBox(canvasImage(t, c))
-	if box.Dy() != Height || box.Max.X != Width || box.Dx() >= Width || box.Dx() < 916 || c.Placement.AnchorUnmet || !c.Verified {
+	if box.Dy() != Height || box.Max.X != Width || math.Abs(float64(box.Dx())-945*.95) > 1 || c.Placement.AnchorUnmet || !c.Verified {
 		t.Fatalf("paired top/bottom blocked subtle safe adjustment or allowed obvious distortion: bounds=%v canvas=%+v", box, c)
 	}
 }
 
 func TestSubtleStretchSurvivesTheNextTranslationOnlyRound(t *testing.T) {
 	source := patternFile(t, solid(945, 1890))
-	first, err := Build(source, filepath.Join(t.TempDir(), "first.png"), psx.RenderRequest{NoCrop: true, PreferOffsets: true, AnchorX: 2, OffsetY: .2}, .8)
+	first, err := Build(source, filepath.Join(t.TempDir(), "first.png"), psx.RenderRequest{NoCrop: true, PreferOffsets: true, AnchorX: 2, OffsetY: .2}, .95)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,8 +84,7 @@ func TestSubtleAspectCanSatisfyBothPairedAxes(t *testing.T) {
 
 func TestBuildRejectsInvalidRequestedAspect(t *testing.T) {
 	source := patternFile(t, solid(94, 189))
-	// 上界是 psx.MaxVerticalStretch（1.08）；超过它才算「明显变形」。
-	for _, ratio := range []float64{.96, 1.09, 1.2, -1, math.NaN(), math.Inf(1)} {
+	for _, ratio := range []float64{.89, 1.13, 1.2, -1, math.NaN(), math.Inf(1)} {
 		if _, err := Build(source, filepath.Join(t.TempDir(), "canvas.png"), psx.RenderRequest{NoCrop: true, StretchY: ratio}, 1); err == nil {
 			t.Errorf("invalid input aspect accepted: %v", ratio)
 		}

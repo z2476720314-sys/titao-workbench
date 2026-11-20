@@ -62,6 +62,8 @@ type RenderRequest struct {
 	// Coordinates are normalized; zero keeps the existing whole-canvas constraints.
 	ContentBounds    [4]float64
 	AnchorX, AnchorY int
+	// IgnoreCutAnchors preserves the explicit KeepWhole policy when extracting content.
+	IgnoreCutAnchors bool
 	CellSize         int
 	// PSVersion 是 Photoshop 版本号，用于版本自适应能力校验。
 	//
@@ -84,6 +86,9 @@ func (r RenderRequest) MetadataPath(i int) string {
 }
 
 type RenderMetadata struct {
+	ArtifactKind       string             `json:"artifact_kind,omitempty"`
+	SourceSHA256       string             `json:"source_sha256,omitempty"`
+	Transform          [6]float64         `json:"transform,omitempty"`
 	ReviewQuarterTurns map[int]int        `json:"review_quarter_turns,omitempty"`
 	CanvasSHA256       string             `json:"canvas_sha256,omitempty"`
 	CanvasWidth        int                `json:"canvas_width,omitempty"`
@@ -95,16 +100,26 @@ type RenderMetadata struct {
 }
 
 type PrintCanvas struct {
-	Path          string `json:"-"`
-	SHA256        string `json:"sha256"`
-	SourceSHA256  string `json:"source_sha256"`
-	Width, Height int
-	Placement     AppliedPlacement
-	Verified      bool
+	OriginalSHA256 string     `json:"original_sha256,omitempty"`
+	CropBox        [4]int     `json:"crop_box,omitempty"`
+	Kind           string     `json:"kind,omitempty"`
+	SourceFile     string     `json:"source_file,omitempty"`
+	SourceWidth    int        `json:"source_width,omitempty"`
+	SourceHeight   int        `json:"source_height,omitempty"`
+	Transform      [6]float64 `json:"transform,omitempty"`
+	Path           string     `json:"-"`
+	SHA256         string     `json:"sha256,omitempty"`
+	SourceSHA256   string     `json:"source_sha256"`
+	Width, Height  int
+	Placement      AppliedPlacement
+	Verified       bool
 }
 
 // Validate checks the complete canonical PNG and its placement evidence.
 func (c *PrintCanvas) Validate() error {
+	if c != nil && c.Kind != "" {
+		return c.validateDirect()
+	}
 	_, _, err := c.validatedPNG()
 	return err
 }
@@ -140,6 +155,10 @@ func (c *PrintCanvas) validatedPNG() ([]byte, image.Image, error) {
 
 func (r RenderRequest) PrintCanvasPath(i int) string {
 	return fmt.Sprintf("%s/print_canvas_%d.png", strings.ReplaceAll(r.OutDir, "\\", "/"), i)
+}
+
+func (r RenderRequest) ArtworkPlanPath(i int) string {
+	return fmt.Sprintf("%s/artwork_plan_%d.json", strings.ReplaceAll(r.OutDir, "\\", "/"), i)
 }
 
 // TemplateInfo 是模板的结构探查结果。
@@ -544,6 +563,9 @@ func (s *Session) runRenderJSX(req RenderRequest, jsx string) (string, error) {
 }
 
 func frozenRenderJSX(req RenderRequest) (string, error) {
+	if req.Canvas.IsDirect() {
+		return directFrozenRenderJSX(req)
+	}
 	data, im, err := req.Canvas.validatedPNG()
 	if err != nil {
 		return "", err
@@ -648,12 +670,13 @@ const jsxFrozenRender = `(function(){
     if (!order.length) throw new Error("no visible smart objects in target group");
     var base = C.Metadata.placements[0], placements = [], staticCells = [];
     function placementJSON(cell) {
-      return '{"Scale":' + base.Scale + ',"OffsetX":' + base.OffsetX + ',"OffsetY":' + base.OffsetY + ',"Cell":' + cell + ',"Constrained":' + base.Constrained + ',"AnchorUnmet":' + base.AnchorUnmet + ',"AnchorImpossible":' + base.AnchorImpossible + '}';
+      return '{"Scale":' + base.Scale + ',"OffsetX":' + base.OffsetX + ',"OffsetY":' + base.OffsetY + ',"StretchY":' + (base.StretchY || 0) + ',"Cell":' + cell + ',"Constrained":' + base.Constrained + ',"AnchorUnmet":' + base.AnchorUnmet + ',"AnchorImpossible":' + base.AnchorImpossible + '}';
     }
     for (var ci = 0; ci < rows; ci++) {
       if (cells[ci]) placements.push(placementJSON(ci)); else staticCells.push(ci);
     }
-    var metadata = '{"canvas_sha256":"' + C.Metadata.canvas_sha256 + '","canvas_width":945,"canvas_height":1890,"canvas_verified":' + !!C.Metadata.canvas_verified + ',"frame_verified":false,"placements":[' + placements.join(",") + '],"static_cells":[' + staticCells.join(",") + ']}';
+    var prefix = C.Metadata.artifact_kind ? '"artifact_kind":"' + C.Metadata.artifact_kind + '","source_sha256":"' + C.Metadata.source_sha256 + '","transform":[' + C.Metadata.transform.join(",") + '],' : '';
+    var metadata = '{' + prefix + '"canvas_sha256":"' + C.Metadata.canvas_sha256 + '","canvas_width":945,"canvas_height":1890,"canvas_verified":' + !!C.Metadata.canvas_verified + ',"frame_verified":false,"placements":[' + placements.join(",") + '],"static_cells":[' + staticCells.join(",") + ']}';
     for (var si = 0; si < C.Paths.length; si++) {
       for (var oi = 0; oi < order.length; oi++) {
         var source = sources[order[oi]];

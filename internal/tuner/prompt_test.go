@@ -86,6 +86,8 @@ func TestPromptExcludesFalsePositives(t *testing.T) {
 		"不写\"左侧\"\"顶部\"这类笼统位置",
 		"贴近不等于遮挡",
 		"这个字少了哪一笔",
+		"圆环上沿、蜘蛛的腿",
+		"新增遮挡就必须同时填 camera_clear=false 和 good=false",
 	} {
 		if !strings.Contains(promptTemplate, want) {
 			t.Errorf("提示词缺少误判排除项：%q", want)
@@ -129,9 +131,19 @@ func TestPromptDefinesEdgeAnchoringByStraightCuts(t *testing.T) {
 			t.Errorf("提示词缺少贴边判据：%q", want)
 		}
 	}
-	// 贴边必须只在评审修正阶段发生，不能在初始渲染阶段被强制。
-	if !strings.Contains(promptTemplate, "不在渲染阶段强制贴底或贴边") {
-		t.Error("提示词必须说明贴边属于评审修正，不是初始渲染行为")
+	if !strings.Contains(promptTemplate, "直切边由程序校验并贴合") || !strings.Contains(promptTemplate, "显式偏移") {
+		t.Error("提示词必须描述真实的直切边硬约束和显式偏移")
+	}
+}
+
+func TestPromptRequiresTranslationOnlyForOcclusionBottomAttempt(t *testing.T) {
+	for _, want := range []string{"条件贴底", "上方重要内容被镜头遮挡", "整体向下平移", "保持大小、比例和横向位置不变", "不能向下拉伸", "贴底后仍有遮挡", "停止继续微调", "不得改写为已避镜头"} {
+		if !strings.Contains(promptTemplate, want) {
+			t.Errorf("missing conditional bottom policy: %q", want)
+		}
+	}
+	if strings.Contains(promptTemplate, "不在渲染阶段强制贴底或贴边") {
+		t.Error("prompt contradicts deterministic cut-edge anchoring")
 	}
 }
 

@@ -37,12 +37,12 @@ func TestPlanStretchAccumulationIsBounded(t *testing.T) {
 
 // 越界的 stretch_y 整条建议作废，不能部分采纳。
 func TestAdjustmentRejectsOutOfRangeStretch(t *testing.T) {
-	for _, v := range []float64{0.5, 0.96, 1.09, 2, math.NaN(), math.Inf(1)} {
+	for _, v := range []float64{0.5, 0.89, 1.13, 2, math.NaN(), math.Inf(1)} {
 		if validAdjustment(Adjustment{ScaleRatio: 1, StretchY: v}) {
 			t.Fatalf("stretch_y=%v 应被拒绝", v)
 		}
 	}
-	for _, v := range []float64{0.97, 1.0, 1.05, 1.08} {
+	for _, v := range []float64{0.90, 0.97, 1.0, 1.05, 1.08, 1.12} {
 		if !validAdjustment(Adjustment{ScaleRatio: 1, StretchY: v}) {
 			t.Fatalf("stretch_y=%v 应被接受", v)
 		}

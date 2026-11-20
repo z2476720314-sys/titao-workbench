@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"titao/internal/cfg"
+	"titao/internal/psx"
 )
 
 // 与队列分开保存，清理队列、开始新批次都不丢失已导出的组合。
@@ -22,6 +23,8 @@ type completionFile struct {
 }
 
 type completionRecord struct {
+	ArtifactKind string            `json:"artifact_kind,omitempty"`
+	SourceSHA256 string            `json:"source_sha256,omitempty"`
 	Legacy       bool              `json:"legacy,omitempty"`
 	Canvas       *completionInput  `json:"canvas,omitempty"`
 	CanvasSHA256 string            `json:"canvas_sha256,omitempty"`
@@ -44,10 +47,17 @@ func completionRecordOf(t *Task) (completionRecord, error) {
 		}
 		hash, err := inputSHA(t.CanvasPath)
 		if err != nil || hash != t.CanvasSHA256 {
-			return rec, fmt.Errorf("公共印刷画布发生变化，未记录完成")
+			return rec, fmt.Errorf("公共原图版位发生变化，未记录完成")
 		}
 		rec.Canvas = &file
 		rec.CanvasSHA256 = t.CanvasSHA256
+		if filepath.Ext(t.CanvasPath) == ".json" {
+			plan, err := psx.LoadArtworkPlan(t.CanvasPath)
+			if err != nil {
+				return rec, err
+			}
+			rec.ArtifactKind, rec.SourceSHA256 = plan.Kind, plan.SourceSHA256
+		}
 	}
 	for _, path := range t.Files {
 		file, err := completionInputOf(path)
@@ -84,7 +94,14 @@ func (rec completionRecord) canvasValid() bool {
 		return false
 	}
 	hash, err := inputSHA(rec.Canvas.Path)
-	return err == nil && hash == rec.CanvasSHA256
+	if err != nil || hash != rec.CanvasSHA256 {
+		return false
+	}
+	if rec.ArtifactKind != "" {
+		plan, err := psx.LoadArtworkPlan(rec.Canvas.Path)
+		return err == nil && rec.ArtifactKind == plan.Kind && rec.SourceSHA256 == plan.SourceSHA256
+	}
+	return true
 }
 
 func (rec completionRecord) resolve(outputRoot string) (completionRecord, bool) {
@@ -311,7 +328,11 @@ func completionKey(opt Options, def cfg.Config, t *Task) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	boundaryVersion := 4
+	boundaryVersion := 6
+	patternSHA, err := inputSHA(t.Pattern)
+	if err != nil {
+		return "", err
+	}
 	data, err := json.Marshal(struct {
 		Pattern                completionInput
 		Template               completionInput
@@ -330,11 +351,12 @@ func completionKey(opt Options, def cfg.Config, t *Task) (string, error) {
 		OffsetY                float64
 		CellSize               int
 		JPGQuality             int
-		VisibleBoundaryVersion int  `json:"visible_boundary_version,omitempty"`
-		KeepWhole              bool `json:"keep_whole,omitempty"`
+		VisibleBoundaryVersion int    `json:"visible_boundary_version,omitempty"`
+		KeepWhole              bool   `json:"keep_whole,omitempty"`
+		PatternSHA256          string `json:"pattern_sha256"`
 	}{pattern, template, output, t.PatternName, t.TemplateName, opt.Group, opt.Fit,
 		opt.Scales, opt.Auto, reviewOn, rounds, opt.TrimAlpha, opt.NoCrop, opt.OffsetX, opt.OffsetY,
-		opt.CellSize, opt.JPGQuality, boundaryVersion, t.KeepWhole})
+		opt.CellSize, opt.JPGQuality, boundaryVersion, t.KeepWhole, patternSHA})
 	if err != nil {
 		return "", err
 	}
@@ -420,7 +442,7 @@ func (f *completionFile) seedQueue(q *Queue, def cfg.Config) bool {
 		if t.Phase != PhaseDone || needsManualReview(t.Message) {
 			continue
 		}
-		if t.CanvasSHA256 == "" || t.CanvasPath == "" {
+		if t.CanvasSHA256 == "" || t.CanvasPath == "" || filepath.Ext(t.CanvasPath) != ".json" {
 			if _, valid := completionOutputs(t.Files); !valid {
 				continue
 			}
@@ -587,8 +609,8 @@ func (e *Engine) recordCompletion(opt Options, def cfg.Config, t *Task) error {
 	if t.Phase != PhaseDone || needsManualReview(t.Message) {
 		return nil
 	}
-	if e.groupFn != nil && (t.CanvasSHA256 == "" || t.CanvasPath == "") {
-		return fmt.Errorf("缺少公共印刷画布，未记录完成")
+	if e.groupFn != nil && (t.CanvasSHA256 == "" || filepath.Ext(t.CanvasPath) != ".json") {
+		return fmt.Errorf("缺少公共原图版位，未记录完成")
 	}
 	if _, valid := completionOutputs(t.Files); !valid {
 		return nil
